@@ -1,10 +1,12 @@
 version: 2
 updates:
+  # 全量分组：每周外部+内部依赖合并为一个 PR，
+  # 组合兼容性由该 PR 的 CI 一次验证，避免逐包 PR 洪峰（34+ PR 那种）。
   - package-ecosystem: gomod
     directory: /
     schedule:
       interval: weekly
     groups:
-      ekit-matrix:
+      all-deps:
         patterns:
-          - "github.com/oekit/*"
+          - "*"

@@ -1,0 +1,39 @@
+# Binaries
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+/bin/
+/dist/
+
+# Test / coverage artifacts
+*.out
+*.prof
+*.test
+coverage.out
+coverage.html
+
+# Dependency directories
+/vendor/
+
+# IDE / editor
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Local environment / config
+.env
+.env.local
+*.local.yaml
+
+# Tooling artifacts (AI session / security scanner / video tool)
+.mimosa/
+.v2c/
+.zcode/

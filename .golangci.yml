@@ -1,0 +1,78 @@
+version: "2"
+run:
+  timeout: 5m
+  go: "1.26"
+linters:
+  enable:
+    - bodyclose
+    - gocritic
+    - gosec
+    - misspell
+    - nilerr
+    - noctx
+    - nolintlint
+    - prealloc
+    - revive
+    - rowserrcheck
+    - sqlclosecheck
+    - unconvert
+    - unparam
+  settings:
+    gocritic:
+      disabled-checks:
+        - hugeParam
+        - rangeValCopy
+      enabled-tags:
+        - diagnostic
+        - performance
+    gosec:
+      excludes:
+        - G104  # 允许审计错误未检查（我们已手动处理关键错误）
+        - G401  # md5/sha1 用于缓存键、内容校验和等非加密场景
+        - G404  # math/rand 用于负载均衡、jitter 等非加密随机场景
+        - G501  # 允许导入 crypto/md5（非加密用途）
+        - G505  # 允许导入 crypto/sha1（非加密用途）
+        - G115  # 端口号等小整数的 int/uint 转换，业务上不会溢出
+    govet:
+      enable:
+        - shadow
+    revive:
+      rules:
+        - name: exported
+          disabled: true
+        - name: var-naming
+          disabled: true
+  exclusions:
+    generated: lax
+    presets:
+      - comments
+      - common-false-positives
+      - legacy
+      - std-error-handling
+    rules:
+      - linters:
+          - errcheck  # 测试桩 Write/Read 忽略返回值是惯例
+          - gocritic
+          - gosec
+          - noctx     # 测试固定本地地址/httptest 构造,无需 ctx 取消
+          - unparam  # 测试桩常含接口强制的未用参数/固定返回值
+        path: _test\.go
+      - linters:
+          - all
+        path: doc\.go
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
+formatters:
+  enable:
+    - gofmt
+  exclusions:
+    generated: lax
+    paths:
+      - third_party$
+      - builtin$
+      - examples$

@@ -7,9 +7,9 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	nnsclient "github.com/oekit/nns/nns/client"
+	"github.com/oekit/registry/registry"
 	"github.com/sony/gobreaker"
-	nnsclient "github.com/yi-nology/ekit-nns/nns/client"
-	"github.com/yi-nology/ekit-registry/registry"
 )
 
 // TestBreakerCache_PerServiceIsolation 验证熔断器按服务分片：

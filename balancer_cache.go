@@ -4,8 +4,8 @@ import (
 	"context"
 	"sync"
 
-	"github.com/yi-nology/ekit-httpx/loadbalance"
-	nnsclient "github.com/yi-nology/ekit-nns/nns/client"
+	"github.com/oekit/httpx/loadbalance"
+	nnsclient "github.com/oekit/nns/nns/client"
 )
 
 // balancerCache 管理服务名到负载均衡器的映射。

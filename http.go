@@ -11,16 +11,16 @@ import (
 	"strings"
 	"time"
 
-	nnsclient "github.com/yi-nology/ekit-nns/nns/client"
+	nnsclient "github.com/oekit/nns/nns/client"
 
-	"github.com/yi-nology/ekit-metrics/resilience"
+	"github.com/oekit/metrics/resilience"
 
 	"github.com/cloudwego/hertz/pkg/protocol"
+	"github.com/oekit/httpx/httpx"
+	"github.com/oekit/httpx/loadbalance"
+	"github.com/oekit/logx"
+	"github.com/oekit/registry/registry"
 	"github.com/sony/gobreaker"
-	"github.com/yi-nology/ekit-httpx/httpx"
-	"github.com/yi-nology/ekit-httpx/loadbalance"
-	"github.com/yi-nology/ekit-logx"
-	"github.com/yi-nology/ekit-registry/registry"
 )
 
 var epLog = logx.Delegating("nns-endpoint")

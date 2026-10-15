@@ -8,13 +8,13 @@ import (
 	"strconv"
 	"time"
 
-	nnsclient "github.com/yi-nology/ekit-nns/nns/client"
+	nnsclient "github.com/oekit/nns/nns/client"
 
-	"github.com/yi-nology/ekit-metrics/resilience"
+	"github.com/oekit/metrics/resilience"
 
+	"github.com/oekit/httpx/loadbalance"
+	"github.com/oekit/registry/registry"
 	"github.com/sony/gobreaker"
-	"github.com/yi-nology/ekit-httpx/loadbalance"
-	"github.com/yi-nology/ekit-registry/registry"
 	"google.golang.org/grpc"
 )
 

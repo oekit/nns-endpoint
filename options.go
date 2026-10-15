@@ -3,9 +3,9 @@ package endpoint
 import (
 	"time"
 
+	"github.com/oekit/metrics/resilience"
 	prom "github.com/prometheus/client_golang/prometheus"
 	"github.com/sony/gobreaker"
-	"github.com/yi-nology/ekit-metrics/resilience"
 )
 
 // defaultBreakerSettings 是 per-service 熔断器的默认参数

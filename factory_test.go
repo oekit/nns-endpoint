@@ -4,10 +4,10 @@ import (
 	"context"
 	"testing"
 
-	"github.com/yi-nology/ekit-httpx/loadbalance"
-	nnsclient "github.com/yi-nology/ekit-nns/nns/client"
-	"github.com/yi-nology/ekit-nns/nns/metadata"
-	"github.com/yi-nology/ekit-registry/registry"
+	"github.com/oekit/httpx/loadbalance"
+	nnsclient "github.com/oekit/nns/nns/client"
+	"github.com/oekit/nns/nns/metadata"
+	"github.com/oekit/registry/registry"
 )
 
 // newTestServiceClient 创建一个用于测试的 mock 模式 ServiceClient 实例。

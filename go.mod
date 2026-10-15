@@ -1,16 +1,16 @@
-module github.com/yi-nology/ekit-nns-endpoint
+module github.com/oekit/nns-endpoint
 
 go 1.26.0
 
 require (
 	github.com/cloudwego/hertz v0.10.6
+	github.com/oekit/httpx v0.1.4
+	github.com/oekit/logx v0.1.6
+	github.com/oekit/metrics v0.1.4
+	github.com/oekit/nns v0.3.2
+	github.com/oekit/registry v0.2.5
 	github.com/prometheus/client_golang v1.25.0
 	github.com/sony/gobreaker v1.0.0
-	github.com/yi-nology/ekit-httpx v0.1.3
-	github.com/yi-nology/ekit-logx v0.1.4
-	github.com/yi-nology/ekit-metrics v0.1.2
-	github.com/yi-nology/ekit-nns v0.3.1
-	github.com/yi-nology/ekit-registry v0.2.2
 	google.golang.org/grpc v1.84.0
 )
 
@@ -59,6 +59,8 @@ require (
 	github.com/modern-go/reflect2 v1.0.2 // indirect
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
 	github.com/nacos-group/nacos-sdk-go/v2 v2.3.6-0.20260601044846-0e3d1d099507 // indirect
+	github.com/oekit/concurrency v0.1.3 // indirect
+	github.com/oekit/core v0.3.2 // indirect
 	github.com/orcaman/concurrent-map v0.0.0-20210501183033-44dafcb38ecc // indirect
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/prometheus/client_model v0.6.3 // indirect
@@ -69,8 +71,6 @@ require (
 	github.com/tidwall/pretty v1.2.0 // indirect
 	github.com/tjfoc/gmsm v1.4.1 // indirect
 	github.com/twitchyliquid64/golang-asm v0.15.1 // indirect
-	github.com/yi-nology/ekit-concurrency v0.1.1 // indirect
-	github.com/yi-nology/ekit-core v0.3.0 // indirect
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
 	go.opentelemetry.io/otel v1.46.0 // indirect
 	go.opentelemetry.io/otel/metric v1.46.0 // indirect

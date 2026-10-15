@@ -9,10 +9,10 @@ import (
 	"testing"
 	"time"
 
+	nnsclient "github.com/oekit/nns/nns/client"
+	"github.com/oekit/nns/nns/metadata"
+	"github.com/oekit/registry/registry"
 	"github.com/sony/gobreaker"
-	nnsclient "github.com/yi-nology/ekit-nns/nns/client"
-	"github.com/yi-nology/ekit-nns/nns/metadata"
-	"github.com/yi-nology/ekit-registry/registry"
 )
 
 // newFactoryWithServers 构造带自定义服务配置与多个静态实例的 HTTP 工厂。

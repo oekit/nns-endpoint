@@ -7,4 +7,4 @@ updates:
     groups:
       ekit-matrix:
         patterns:
-          - "github.com/yi-nology/*"
+          - "github.com/oekit/*"

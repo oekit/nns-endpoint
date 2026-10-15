@@ -12,6 +12,6 @@ permissions:
 jobs:
   ci:
     name: Lint & Test
-    uses: oekit/.github/.github/workflows/go-ci.yml@main
+    uses: oekit/.github/.github/workflows/go-ci.yml@
     with:
-      go-version: '          go-version: '1.26''
+      go-version: '1.26'

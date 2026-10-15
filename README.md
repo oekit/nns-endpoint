@@ -3,6 +3,7 @@
 > NNS 端点工厂——per-service 熔断（4xx 不计失败）、HTTP 换实例重试、gRPC 连接池、弹性指标
 
 > 项目主页：**https://oekit.github.io/** · 名称由来：**O**pen **E**asy **Kit**（开源 · 易用 · 工具集合）
+> 🤖 AI Agent：本仓规范与硬规则见 [AGENTS.md](AGENTS.md)；机器可读索引见 [llms.txt](https://oekit.github.io/llms.txt)（接口签名以源码为准）。
 
 本仓库是 [ekit](https://git.enjoye.top/enjoydream/ekit) 拆分矩阵的成员（Round-4 微库化）。
 
@@ -10,6 +11,16 @@
 
 ```bash
 go get github.com/oekit/nns-endpoint@v0.1.2
+```
+
+## 快速使用
+
+```go
+import endpoint "github.com/oekit/nns-endpoint"
+
+factory := endpoint.NewHTTPEndpointFactory(nnsc.ServiceClient())
+ep, _ := factory.MakeEndpoint("payment-svc")
+resp, err := ep(ctx, req) // 背后：服务发现 + per-service 熔断 + 换实例重试
 ```
 
 ## 包清单

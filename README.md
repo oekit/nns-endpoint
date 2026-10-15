@@ -10,7 +10,7 @@
 ## 安装
 
 ```bash
-go get github.com/oekit/nns-endpoint@v0.1.2
+go get github.com/oekit/nns-endpoint@v0.1.3
 ```
 
 ## 能做什么

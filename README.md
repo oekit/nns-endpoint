@@ -13,16 +13,32 @@
 go get github.com/oekit/nns-endpoint@v0.1.2
 ```
 
-## 快速使用
+## 能做什么
 
+- **HTTP 端点**：服务发现 + per-service 熔断 + 失败**换实例**重试，调用即函数
+- **gRPC 端点**：连接池 + 同款熔断语义
+- **熔断口径**：4xx 不计失败（调用方错误与对端健康无关），5xx/网络错误计失败
+- **弹性指标**：WithMetrics 一行接入
+- **ErrCircuitOpen** 可判定（与 httpx 同一 sentinel）
+
+## 使用示例
+
+### HTTP 端点：调用即函数
 ```go
 import endpoint "github.com/oekit/nns-endpoint"
 
-factory := endpoint.NewHTTPEndpointFactory(nnsc.ServiceClient())
-ep, _ := factory.MakeEndpoint("payment-svc")
-resp, err := ep(ctx, req) // 背后：服务发现 + per-service 熔断 + 换实例重试
+f := endpoint.NewHTTPEndpointFactory(nnsc.ServiceClient(),
+    endpoint.WithMetrics(metrics.Registry, "nns"))
+ep, _ := f.MakeEndpoint("payment-svc")
+resp, err := ep(ctx, endpoint.HTTPRequest{ /* Method/Path/Body */ })
 ```
+### gRPC 端点（连接池）
+```go
+gf := endpoint.NewGRPCEndpointFactory(nnsc.ServiceClient())
+gep, _ := gf.MakeEndpoint("user-rpc")
+resp, err := gep(ctx, endpoint.GRPCRequest{ /* ... */ })
 
+> ⚠️ **熔断口径**：4xx 不计熔断失败；`ResetBalancer(serviceName)` 可手动重置负载均衡状态。
 ## 包清单
 
 - 根包 `endpoint` — HTTPEndpointFactory/GRPCEndpointFactory，经 `nns.ServiceClient()` 构造（Round-4 自 ekit-nns 分家）

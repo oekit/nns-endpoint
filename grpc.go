@@ -4,16 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net"
-	"strconv"
 	"time"
 
-	nnsclient "github.com/oekit/nns/nns/client"
+	nnsclient "github.com/oekit/nns/client"
 
 	"github.com/oekit/metrics/resilience"
 
 	"github.com/oekit/httpx/loadbalance"
-	"github.com/oekit/registry/registry"
+	"github.com/oekit/registry"
 	"github.com/sony/gobreaker"
 	"google.golang.org/grpc"
 )
@@ -37,7 +35,7 @@ type GRPCRequest struct {
 type GRPCEndpointFactory struct {
 	client        *nnsclient.ServiceClient
 	pool          *GRPCPool
-	balancerCache *balancerCache
+	selectorCache *selectorCache
 	breakers      *breakerCache
 	metrics       *resilience.Metrics
 }
@@ -50,26 +48,27 @@ const grpcMetricsKind = "nns-grpc"
 // 注意：gRPC 端点不做换实例重试——streaming/非幂等 RPC 的重试语义
 // 复杂（需 header/ trailers 透传配合），如需重试在业务层按方法粒度实现。
 func NewGRPCEndpointFactory(c *nnsclient.ServiceClient, opts ...EndpointFactoryOption) *GRPCEndpointFactory {
-	tmpl := newBreakerTemplate(grpcMetricsKind, opts)
+	cfg := newFactoryConfig(opts)
+	tmpl := newBreakerTemplate(grpcMetricsKind, cfg)
 	f := &GRPCEndpointFactory{
 		client:        c,
 		pool:          NewGRPCPool(),
-		balancerCache: newBalancerCache(c),
+		selectorCache: newSelectorCache(c, cfg.selector),
 		breakers:      newBreakerCache(tmpl.settingsFor),
 		metrics:       tmpl.metrics,
 	}
 
-	// 配置变更时重置 balancer 缓存
+	// 配置变更时重置选择器缓存
 	c.OnConfigChange(func(serviceName string) {
-		f.balancerCache.reset(serviceName)
+		f.selectorCache.reset(serviceName)
 	})
 
 	return f
 }
 
-// ResetBalancer 清除指定服务的负载均衡器缓存，下次调用时按最新配置重建。
-func (f *GRPCEndpointFactory) ResetBalancer(serviceName string) {
-	f.balancerCache.reset(serviceName)
+// ResetSelector 清除指定服务的节点选择器缓存，下次调用时按最新配置重建。
+func (f *GRPCEndpointFactory) ResetSelector(serviceName string) {
+	f.selectorCache.reset(serviceName)
 }
 
 // MakeEndpoint 为指定服务创建 gRPC 端点，包含负载均衡、连接池和熔断逻辑。
@@ -90,17 +89,24 @@ func (f *GRPCEndpointFactory) MakeEndpoint(serviceName string, opts ...grpc.Dial
 			return nil, registry.ErrNoInstances
 		}
 
-		idx, err := f.balancerCache.getOrCreate(ctx, serviceName).Pick(loadbalance.ToInstances(instances))
+		sel, err := f.selectorCache.getOrCreate(ctx, serviceName)
+		if err != nil {
+			return nil, err
+		}
+		nodes := loadbalance.NodesFrom(instances,
+			func(i registry.Instance) string { return i.Addr() },
+			func(i registry.Instance) float64 { return i.Weight },
+			func(i registry.Instance) map[string]string { return i.Metadata },
+			func(i registry.Instance) string { return i.Service },
+		)
+		n, done, err := sel.Select(ctx, nodes)
 		if err != nil {
 			return nil, err
 		}
 
-		instance := instances[idx]
-
-		addr := net.JoinHostPort(instance.IP, strconv.Itoa(instance.Port))
-
-		conn, err := f.pool.Get(ctx, addr, opts...)
+		conn, err := f.pool.Get(ctx, n.Address(), opts...)
 		if err != nil {
+			done(ctx, loadbalance.DoneInfo{Err: err})
 			return nil, fmt.Errorf("get grpc conn: %w", err)
 		}
 

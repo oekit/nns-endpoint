@@ -10,8 +10,8 @@ import (
 	"time"
 
 	"github.com/oekit/metrics/resilience"
-	nnsclient "github.com/oekit/nns/nns/client"
-	"github.com/oekit/registry/registry"
+	nnsclient "github.com/oekit/nns/client"
+	"github.com/oekit/registry"
 	prom "github.com/prometheus/client_golang/prometheus"
 	"github.com/sony/gobreaker"
 )

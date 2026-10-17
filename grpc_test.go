@@ -189,19 +189,19 @@ func TestGRPCEndpoint_MakeEndpoint_InvalidRequestType(t *testing.T) {
 	}
 }
 
-// TestGRPCEndpoint_ResetBalancer verifies that gRPC ResetBalancer drops
-// the cached balancer. (HTTP equivalent is covered in factory_test.go.)
-func TestGRPCEndpoint_ResetBalancer(t *testing.T) {
+// TestGRPCEndpoint_ResetSelector verifies that gRPC ResetSelector drops
+// the cached selector. (HTTP equivalent is covered in factory_test.go.)
+func TestGRPCEndpoint_ResetSelector(t *testing.T) {
 	c := newTestServiceClient(t)
 	factory := NewGRPCEndpointFactory(c)
 	defer factory.Close()
 
-	b1 := factory.balancerCache.getOrCreate(context.Background(), "svc-a")
-	factory.ResetBalancer("svc-a")
-	b2 := factory.balancerCache.getOrCreate(context.Background(), "svc-a")
+	b1, _ := factory.selectorCache.getOrCreate(context.Background(), "svc-a")
+	factory.ResetSelector("svc-a")
+	b2, _ := factory.selectorCache.getOrCreate(context.Background(), "svc-a")
 
 	if b1 == b2 {
-		t.Fatal("expected new balancer after ResetBalancer, got cached one")
+		t.Fatal("expected new selector after ResetSelector, got cached one")
 	}
 }
 

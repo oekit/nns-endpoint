@@ -2,6 +2,18 @@
 
 由 ekit v0.34.0（git.enjoye.top/enjoydream/ekit，冻结维护）拆分而来。所有 notable 变更记录如下。
 
+## [v0.2.0] — 2026-10-17
+
+### Breaking（go-kratos 对齐：随 httpx v0.4.0 Selector 全量迁移）
+- `balancerCache` → `selectorCache`（`loadbalance.Selector`，经服务配置 Lb 字段
+  `NewSelector(NormalizeSelectorName(lb))` 构造，不可识别回退 roundrobin）
+- `HTTPEndpointFactory.ResetBalancer`/`GRPCEndpointFactory.ResetBalancer` → `ResetSelector`
+- HTTP/gRPC 选点从 `Balancer.Pick(索引)` 切换为 `Selector.Select`（Node 携带元数据、
+  调用结果经 DoneFunc 回写）
+- 新增 `WithSelector(sel loadbalance.Selector)` 工厂选项：全服务共用注入的选择器，
+  覆盖服务治理配置中的 lb 策略
+- 依赖升级：httpx v0.4.0 / nns v0.4.0 / registry v0.4.0（三仓均扁平化/Selector 化）
+
 ## [v0.1.7] — 2026-10-17
 
 - httpx 地板 v0.3.1 → v0.3.2；nns 地板 v0.3.4 → v0.3.5

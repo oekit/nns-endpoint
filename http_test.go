@@ -11,9 +11,9 @@ import (
 	"testing"
 	"time"
 
-	nnsclient "github.com/oekit/nns/nns/client"
-	"github.com/oekit/nns/nns/metadata"
-	"github.com/oekit/registry/registry"
+	nnsclient "github.com/oekit/nns/client"
+	"github.com/oekit/nns/metadata"
+	"github.com/oekit/registry"
 )
 
 // newHTTPFactoryWithTestServer starts an httptest server and builds a

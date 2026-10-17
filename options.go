@@ -3,6 +3,7 @@ package endpoint
 import (
 	"time"
 
+	"github.com/oekit/httpx/loadbalance"
 	"github.com/oekit/metrics/resilience"
 	prom "github.com/prometheus/client_golang/prometheus"
 	"github.com/sony/gobreaker"
@@ -25,6 +26,9 @@ func defaultBreakerSettings() gobreaker.Settings {
 type factoryConfig struct {
 	breakerTmpl gobreaker.Settings
 	metrics     *resilience.Metrics
+	// selector 非空时全服务共用该节点选择器（WithSelector 注入），
+	// 覆盖服务治理配置中的 lb 策略。
+	selector loadbalance.Selector
 }
 
 // EndpointFactoryOption 是端点工厂（HTTP/gRPC）的配置函数类型。
@@ -41,6 +45,17 @@ type EndpointFactoryOption func(*factoryConfig)
 func WithBreakerSettings(tmpl gobreaker.Settings) EndpointFactoryOption {
 	return func(c *factoryConfig) {
 		c.breakerTmpl = tmpl
+	}
+}
+
+// WithSelector 注入节点选择器（loadbalance.Selector），覆盖服务治理配置
+// 中的 lb 策略；nil 被忽略。未注入时按服务配置的 Lb 字段经
+// loadbalance.NewSelector 构造（不可识别回退 roundrobin）。
+func WithSelector(sel loadbalance.Selector) EndpointFactoryOption {
+	return func(c *factoryConfig) {
+		if sel != nil {
+			c.selector = sel
+		}
 	}
 }
 
@@ -63,14 +78,19 @@ type breakerTemplate struct {
 	metrics     *resilience.Metrics
 }
 
-// newBreakerTemplate 合并默认参数与用户选项，返回带指标的模板。
-// Name 由工厂覆盖为 "kind:service"，保证熔断器实例可按名称观测。
-func newBreakerTemplate(kind string, opts []EndpointFactoryOption) breakerTemplate {
-	def := defaultBreakerSettings()
-	cfg := &factoryConfig{breakerTmpl: def}
+// newFactoryConfig 合并默认参数与用户选项。
+func newFactoryConfig(opts []EndpointFactoryOption) *factoryConfig {
+	cfg := &factoryConfig{breakerTmpl: defaultBreakerSettings()}
 	for _, opt := range opts {
 		opt(cfg)
 	}
+	return cfg
+}
+
+// newBreakerTemplate 从 factoryConfig 构造带指标的熔断模板。
+// Name 由工厂覆盖为 "kind:service"，保证熔断器实例可按名称观测。
+func newBreakerTemplate(kind string, cfg *factoryConfig) breakerTemplate {
+	def := defaultBreakerSettings()
 	tmpl := cfg.breakerTmpl
 	metrics := cfg.metrics
 

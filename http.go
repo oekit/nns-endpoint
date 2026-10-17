@@ -5,13 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net"
 	"net/url"
-	"strconv"
 	"strings"
 	"time"
 
-	nnsclient "github.com/oekit/nns/nns/client"
+	nnsclient "github.com/oekit/nns/client"
 
 	"github.com/oekit/metrics/resilience"
 
@@ -19,7 +17,7 @@ import (
 	"github.com/oekit/httpx"
 	"github.com/oekit/httpx/loadbalance"
 	"github.com/oekit/logx"
-	"github.com/oekit/registry/registry"
+	"github.com/oekit/registry"
 	"github.com/sony/gobreaker"
 )
 
@@ -40,7 +38,7 @@ type HTTPRequest struct {
 type HTTPEndpointFactory struct {
 	client        *nnsclient.ServiceClient
 	http          *httpx.Client
-	balancerCache *balancerCache
+	selectorCache *selectorCache
 	breakers      *breakerCache
 	metrics       *resilience.Metrics
 }
@@ -56,26 +54,27 @@ func NewHTTPEndpointFactory(c *nnsclient.ServiceClient, opts ...EndpointFactoryO
 		httpx.WithTimeout(30*time.Second),
 		httpx.WithTracePropagation(),
 	)
-	tmpl := newBreakerTemplate(httpMetricsKind, opts)
+	cfg := newFactoryConfig(opts)
+	tmpl := newBreakerTemplate(httpMetricsKind, cfg)
 
 	f := &HTTPEndpointFactory{
 		client:        c,
 		http:          httpClient,
-		balancerCache: newBalancerCache(c),
+		selectorCache: newSelectorCache(c, cfg.selector),
 		breakers:      newBreakerCache(tmpl.settingsFor),
 		metrics:       tmpl.metrics,
 	}
 
 	c.OnConfigChange(func(serviceName string) {
-		f.balancerCache.reset(serviceName)
+		f.selectorCache.reset(serviceName)
 	})
 
 	return f
 }
 
-// ResetBalancer 清除指定服务的负载均衡器缓存。
-func (f *HTTPEndpointFactory) ResetBalancer(serviceName string) {
-	f.balancerCache.reset(serviceName)
+// ResetSelector 清除指定服务的节点选择器缓存（配置热更后强制重建）。
+func (f *HTTPEndpointFactory) ResetSelector(serviceName string) {
+	f.selectorCache.reset(serviceName)
 }
 
 // MakeEndpoint 为指定服务创建 HTTP 端点。
@@ -151,15 +150,18 @@ func (f *HTTPEndpointFactory) attemptOnce(ctx context.Context, serviceName strin
 		return nil, registry.ErrNoInstances
 	}
 
-	idx, err := f.balancerCache.getOrCreate(ctx, serviceName).Pick(loadbalance.ToInstances(instances))
+	sel, err := f.selectorCache.getOrCreate(ctx, serviceName)
+	if err != nil {
+		return nil, err
+	}
+	n, done, err := sel.Select(ctx, httpx.SelectorNodes(instances))
 	if err != nil {
 		return nil, err
 	}
 
-	instance := instances[idx]
-	addr := "http://" + net.JoinHostPort(instance.IP, strconv.Itoa(instance.Port))
-
-	return f.doRequest(ctx, addr, req, timeout)
+	resp, callErr := f.doRequest(ctx, n.Address(), req, timeout)
+	done(ctx, loadbalance.DoneInfo{Err: callErr})
+	return resp, callErr
 }
 
 // Close 关闭 HTTP 端点工厂持有的资源。

@@ -7,15 +7,15 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	nnsclient "github.com/oekit/nns/nns/client"
-	"github.com/oekit/registry/registry"
+	nnsclient "github.com/oekit/nns/client"
+	"github.com/oekit/registry"
 	"github.com/sony/gobreaker"
 )
 
 // TestBreakerCache_PerServiceIsolation 验证熔断器按服务分片：
 // 同一服务复用同一熔断器，不同服务互相隔离。
 func TestBreakerCache_PerServiceIsolation(t *testing.T) {
-	bc := newBreakerCache(newBreakerTemplate("test", nil).settingsFor)
+	bc := newBreakerCache(newBreakerTemplate("test", newFactoryConfig(nil)).settingsFor)
 
 	a1 := bc.getOrCreate("svc-a")
 	a2 := bc.getOrCreate("svc-a")
@@ -95,10 +95,10 @@ func TestHTTPEndpoint_CircuitBreakerIsolatedPerService(t *testing.T) {
 	}
 }
 
-// TestResetBalancer_AppliesToExistingEndpoints 回归测试（W1-T2）：
-// balancer 必须在端点闭包内按调用获取，ResetBalancer 后存量端点
-// 下一次调用即使用重建的 balancer（修复前闭包持有旧 balancer 引用）。
-func TestResetBalancer_AppliesToExistingEndpoints(t *testing.T) {
+// TestResetSelector_AppliesToExistingEndpoints 回归测试（W1-T2）：
+// selector 必须在端点闭包内按调用获取，ResetSelector 后存量端点
+// 下一次调用即使用重建的 selector（修复前闭包持有旧 selector 引用）。
+func TestResetSelector_AppliesToExistingEndpoints(t *testing.T) {
 	factory := newHTTPFactoryWithTestServer(t, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`{}`))
@@ -110,31 +110,31 @@ func TestResetBalancer_AppliesToExistingEndpoints(t *testing.T) {
 		t.Fatalf("MakeEndpoint: %v", err)
 	}
 
-	// 触发 balancer 创建并缓存
+	// 触发 selector 创建并缓存
 	if _, err := ep(context.Background(), HTTPRequest{Method: http.MethodGet, Path: "/x"}); err != nil {
 		t.Fatalf("first call: %v", err)
 	}
-	factory.balancerCache.mu.RLock()
-	old := factory.balancerCache.balancers["svc-a"]
-	factory.balancerCache.mu.RUnlock()
+	factory.selectorCache.mu.RLock()
+	old := factory.selectorCache.selectors["svc-a"]
+	factory.selectorCache.mu.RUnlock()
 	if old == nil {
-		t.Fatal("expected balancer to be cached after first call")
+		t.Fatal("expected selector to be cached after first call")
 	}
 
-	factory.ResetBalancer("svc-a")
+	factory.ResetSelector("svc-a")
 
-	// 同一端点（存量闭包）再次调用，必须按新配置重建 balancer
+	// 同一端点（存量闭包）再次调用，必须按新配置重建 selector
 	if _, err := ep(context.Background(), HTTPRequest{Method: http.MethodGet, Path: "/x"}); err != nil {
 		t.Fatalf("call after reset: %v", err)
 	}
-	factory.balancerCache.mu.RLock()
-	fresh := factory.balancerCache.balancers["svc-a"]
-	factory.balancerCache.mu.RUnlock()
+	factory.selectorCache.mu.RLock()
+	fresh := factory.selectorCache.selectors["svc-a"]
+	factory.selectorCache.mu.RUnlock()
 
 	if fresh == nil {
-		t.Fatal("expected balancer to be recreated after reset")
+		t.Fatal("expected selector to be recreated after reset")
 	}
 	if fresh == old {
-		t.Fatal("existing endpoint still uses the old balancer after ResetBalancer")
+		t.Fatal("existing endpoint still uses the old selector after ResetSelector")
 	}
 }

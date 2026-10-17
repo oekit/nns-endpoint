@@ -3,9 +3,9 @@ package endpoint
 import (
 	"testing"
 
-	nnsfacade "github.com/oekit/nns/nns"
+	nnsfacade "github.com/oekit/nns"
+	"github.com/oekit/registry"
 	nacospkg "github.com/oekit/registry/nacos"
-	"github.com/oekit/registry/registry"
 )
 
 // TestFacadeServiceClientMakesHTTPEndpoint 验证 NNS 门面暴露的 ServiceClient

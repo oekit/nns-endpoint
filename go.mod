@@ -4,11 +4,11 @@ go 1.26.0
 
 require (
 	github.com/cloudwego/hertz v0.10.6
-	github.com/oekit/httpx v0.4.0
-	github.com/oekit/logx v0.5.0
+	github.com/oekit/httpx v0.4.1
+	github.com/oekit/logx v0.6.0
 	github.com/oekit/metrics v0.1.6
-	github.com/oekit/nns v0.4.0
-	github.com/oekit/registry v0.4.0
+	github.com/oekit/nns v0.4.1
+	github.com/oekit/registry v0.4.1
 	github.com/prometheus/client_golang v1.25.0
 	github.com/sony/gobreaker v1.0.0
 	google.golang.org/grpc v1.84.0
@@ -60,7 +60,7 @@ require (
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
 	github.com/nacos-group/nacos-sdk-go/v2 v2.3.6-0.20260601044846-0e3d1d099507 // indirect
 	github.com/oekit/concurrency v0.5.4 // indirect
-	github.com/oekit/core v0.6.0 // indirect
+	github.com/oekit/core v0.7.0 // indirect
 	github.com/orcaman/concurrent-map v0.0.0-20210501183033-44dafcb38ecc // indirect
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/prometheus/client_model v0.6.3 // indirect

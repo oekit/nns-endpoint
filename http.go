@@ -16,7 +16,7 @@ import (
 	"github.com/oekit/metrics/resilience"
 
 	"github.com/cloudwego/hertz/pkg/protocol"
-	"github.com/oekit/httpx/httpx"
+	"github.com/oekit/httpx"
 	"github.com/oekit/httpx/loadbalance"
 	"github.com/oekit/logx"
 	"github.com/oekit/registry/registry"

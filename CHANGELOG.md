@@ -2,6 +2,8 @@
 
 由 ekit v0.34.0（git.enjoye.top/enjoydream/ekit，冻结维护）拆分而来。所有 notable 变更记录如下。
 
+## [- fix(deps): httpx vv0.4.2 地板对齐（零代码改动）
+
 ## [- fix(deps): metrics vv0.1.7 地板对齐（零代码改动）
 
 ## [- fix(deps): 全部 oekit 依赖地板对齐最新（httpx v0.4.1、nns v0.4.1、registry v0.4.1、logx v0.6.0、core v0.7.0，零代码改动）

@@ -4,10 +4,10 @@ go 1.26.0
 
 require (
 	github.com/cloudwego/hertz v0.10.6
-	github.com/oekit/httpx v0.3.1
+	github.com/oekit/httpx v0.3.2
 	github.com/oekit/logx v0.5.0
 	github.com/oekit/metrics v0.1.6
-	github.com/oekit/nns v0.3.4
+	github.com/oekit/nns v0.3.5
 	github.com/oekit/registry v0.3.1
 	github.com/prometheus/client_golang v1.25.0
 	github.com/sony/gobreaker v1.0.0

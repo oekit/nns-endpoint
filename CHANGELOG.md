@@ -2,6 +2,10 @@
 
 由 ekit v0.34.0（git.enjoye.top/enjoydream/ekit，冻结维护）拆分而来。所有 notable 变更记录如下。
 
+## [v0.1.6] — 2026-10-17
+
+- concurrency 地板 v0.5.2 → v0.5.4（indirect 归位）
+
 ## [v0.1.5] — 2026-10-17
 
 - fix(deps): 内部依赖地板全量对齐最新——httpx v0.3.1、logx v0.5.0、metrics v0.1.6、nns v0.3.4、registry v0.3.1；go 维持 1.26.0（httpx/tracing 生态传导）

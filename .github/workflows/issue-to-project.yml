@@ -1,0 +1,41 @@
+# 各模块仓放置于 .github/workflows/issue-to-project.yml
+# 目的：issue/PR 一开/关就立刻进 org 大盘，不等轮询。
+# 依赖 oekit/.github 的 scripts/sync-projects.py（checkout 下游仓复用）。
+
+name: 即时入板
+
+on:
+  issues:
+    types: [opened, closed, reopened]
+  pull_request:
+    types: [opened, closed, reopened]
+
+permissions:
+  contents: read
+  issues: read
+  pull-requests: read
+
+concurrency:
+  group: issue-to-project-${{ github.event.issue.number || github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  link:
+    runs-on: ubuntu-latest
+    steps:
+      # 脚本在治理仓，这里借检出拿权威版本
+      - uses: actions/checkout@v5
+        with:
+          repository: oekit/.github
+          ref: main
+
+      - name: Link to org boards
+        env:
+          GH_TOKEN: ${{ secrets.OEKIT_PROJECT_TOKEN }}
+          ORG: oekit
+          URL: ${{ github.event.issue.html_url || github.event.pull_request.html_url }}
+          STATE: ${{ github.event.pull_request.merged && 'merged' || github.event.issue.state || github.event.pull_request.state }}
+        run: |
+          set -e
+          echo "link $URL state=$STATE"
+          python3 scripts/sync-projects.py --link "$URL" --state "$STATE"

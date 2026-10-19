@@ -1,7 +1,7 @@
 # AGENTS.md — oekit/nns-endpoint
 
 > NNS 端点工厂——per-service 熔断、换实例重试、gRPC 池
-> 当前版本：`v0.2.3` · module：`github.com/oekit/nns-endpoint` · org：[oekit = Open Easy Kit](https://oekit.github.io)
+> 当前版本：`v0.2.4` · module：`github.com/oekit/nns-endpoint` · org：[oekit = Open Easy Kit](https://oekit.github.io)
 
 ## 本仓包含
 `./`

@@ -19,7 +19,7 @@ import (
 // 改成 3 会静默通过（uint8(1) 是合法常量），标签从此错位。
 //
 // 这条断言不是形式主义：gobreaker 与 concurrency/breaker 的状态序号**相反**
-//（gobreaker: HalfOpen=1/Open=2；concurrency/breaker: Open=1/HalfOpen=2），
+// （gobreaker: HalfOpen=1/Open=2；concurrency/breaker: Open=1/HalfOpen=2），
 // 而 resilience.CircuitState 跟的是 gobreaker 那一套。谁把熔断实现换成
 // concurrency/breaker 供给、却不改这里的转换，标签会立刻错位——钉子让那种
 // 改动**编译期就红**，而不是上线后才发现监控数据在说反话。

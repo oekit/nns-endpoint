@@ -9,6 +9,26 @@ import (
 	"github.com/sony/gobreaker"
 )
 
+// 编译期断言：gobreaker.State 与 resilience.CircuitState 的数值必须一致。
+//
+// 钉子放在**消费侧**——谁改动 resilience 侧的数值，nns-endpoint 立刻编译红，
+// 而不是运行期把熔断状态标签悄悄记反（熔断打开被记成 half_open）。
+//
+// 手法：数组长度必须为 0，差值非 0 即编译失败（正负都拦得住）。
+// 不用 `uint8(差值)` 形态——它只在差值为**负**时报错，resilience 侧把 2
+// 改成 3 会静默通过（uint8(1) 是合法常量），标签从此错位。
+//
+// 这条断言不是形式主义：gobreaker 与 concurrency/breaker 的状态序号**相反**
+// （gobreaker: HalfOpen=1/Open=2；concurrency/breaker: Open=1/HalfOpen=2），
+// 而 resilience.CircuitState 跟的是 gobreaker 那一套。谁把熔断实现换成
+// concurrency/breaker 供给、却不改这里的转换，标签会立刻错位——钉子让那种
+// 改动**编译期就红**，而不是上线后才发现监控数据在说反话。
+var (
+	_ [0]struct{} = [int(resilience.CircuitStateClosed) - int(gobreaker.StateClosed)]struct{}{}
+	_ [0]struct{} = [int(resilience.CircuitStateHalfOpen) - int(gobreaker.StateHalfOpen)]struct{}{}
+	_ [0]struct{} = [int(resilience.CircuitStateOpen) - int(gobreaker.StateOpen)]struct{}{}
+)
+
 // defaultBreakerSettings 是 per-service 熔断器的默认参数
 // （v0.30.0 前为硬编码，此后作为 WithBreakerSettings 未覆盖项的缺省值）。
 func defaultBreakerSettings() gobreaker.Settings {
@@ -112,7 +132,11 @@ func newBreakerTemplate(kind string, cfg *factoryConfig) breakerTemplate {
 		s.OnStateChange = func(name string, from, to gobreaker.State) {
 			epLog.Warn("circuit breaker state change", "breaker", name, "from", from, "to", to)
 			if metrics != nil {
-				metrics.ObserveTransition(serviceName, kind, int(from), int(to))
+				// 类型化传递：状态不再以裸 int 跨模块流转。转换安全性由本文件
+				// 顶部的编译期钉子保证（gobreaker.State 与
+				// resilience.CircuitState 数值必须一致，否则此处编译失败）。
+				metrics.ObserveTransitionTyped(serviceName, kind,
+					resilience.CircuitState(from), resilience.CircuitState(to))
 			}
 			if userOnStateChange != nil {
 				userOnStateChange(name, from, to)

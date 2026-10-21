@@ -2,11 +2,14 @@
 
 由 ekit v0.34.0（git.enjoye.top/enjoydream/ekit，冻结维护）拆分而来。所有 notable 变更记录如下。
 
-## [v0.2.5] — 2026-10-20
+## [v0.2.5] — 2026-10-22
 
 - fix(metrics): 熔断状态类型化传递——`ObserveTransition` 改走 `ObserveTransitionTyped`（`resilience.CircuitState`），不再以裸 int 跨模块流转
 - fix(metrics): 补 gobreaker.State ↔ resilience.CircuitState 的**编译期数值一致性钉子**（3 条），两侧数值一旦分叉即编译失败
 - build: 矩阵内依赖地板对齐——metrics v0.1.7 → v0.1.9、core v0.7.0 → v0.9.2
+- build: 测试改用嵌套模块 registry/nacos——registry v0.5.0 起不再提供该子包
+  - 依赖地板：registry v0.4.1 → **v0.5.0**（新增 require `github.com/oekit/registry/nacos v0.1.0`，中接 `registry/nacosimpl v0.1.0`）；logx v0.7.0 → v0.7.1
+  - registry v0.5.0 把 Nacos 客户端门面拆成独立发版的嵌套模块，import 路径不变但「由哪个 module 提供」变了
 
 ## [v0.2.4] — 2026-10-19
 

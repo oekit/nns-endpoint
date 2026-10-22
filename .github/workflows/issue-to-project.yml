@@ -20,7 +20,13 @@ permissions:
   pull-requests: read
 
 concurrency:
-  group: issue-to-project-${{ github.workflow }}-${{ github.ref }}
+  # group 必须带 event_name 与条目号，否则 events / pull_request / push 三类事件
+  # 会落进同一个 group（events 与 push:main 的 github.ref 都是 refs/heads/main）
+  # 而互相 cancel——实测各仓 push→main 的入板刷新被取消 15~18/18 次，
+  # 大盘刷新只能靠 tag 推送或每小时整点全量补跑兜底。
+  # 拆成三类后：push 仍按 refs/heads/main 收敛（连续推送只跑最新一次），
+  # issues / pull_request 按条目号隔离（并发开多个 issue 不会互相顶掉）。
+  group: issue-to-project-${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}-${{ github.event.issue.number || github.event.pull_request.number }}
   cancel-in-progress: true
 
 jobs:

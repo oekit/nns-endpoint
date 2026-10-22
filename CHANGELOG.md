@@ -2,6 +2,10 @@
 
 由 ekit v0.34.0（git.enjoye.top/enjoydream/ekit，冻结维护）拆分而来。所有 notable 变更记录如下。
 
+## [v0.2.6] — 2026-10-23
+
+- build: 矩阵内依赖地板对齐——httpx v0.8.0 → v0.8.2、nns v0.4.2 → v0.4.4（#27）
+
 ## [v0.2.5] — 2026-10-22
 
 - fix(metrics): 熔断状态类型化传递——`ObserveTransition` 改走 `ObserveTransitionTyped`（`resilience.CircuitState`），不再以裸 int 跨模块流转

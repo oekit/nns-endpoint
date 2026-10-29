@@ -165,8 +165,8 @@ github.com/oekit/concurrency v0.23.2 h1:1iMfoBe7ti6//IRJoyBlokhUKW0tSEvrQIvb3lEX
 github.com/oekit/concurrency v0.23.2/go.mod h1:eLMEfucIyKs1cLGK4+lKRQCf3Fgb6EE/mkpPXFMRuMA=
 github.com/oekit/core v0.12.1 h1:RPSr6AdWl3SpFzZ+w2a4C+nhvZr1NSNt8WNjtGotnM0=
 github.com/oekit/core v0.12.1/go.mod h1:HhBTwYHU5MUp9tfNvHjfZv6P4yglQmn4jKmz98dUIsM=
-github.com/oekit/httpx v0.8.4 h1:RCXRTJF9oV2Alo9WbOdX2XFIun2E5JKnYSOOPW/Y4cM=
-github.com/oekit/httpx v0.8.4/go.mod h1:zGQbvsp14HRnuedU9b5ODBPmwEwupMOKRtfNeUY6NFE=
+github.com/oekit/httpx v0.8.5 h1:XyBgtKoYy5FtJfMOnVydoKa63cY5kNrUqHgv/YYap8c=
+github.com/oekit/httpx v0.8.5/go.mod h1:rtT9pPf968GqHw4CNexN2wv7X+IQX6JqVMJkkPkCl7E=
 github.com/oekit/logx v0.8.0 h1:S0KQOiI6h4GGktsv0fl1KtHBcOGZZgj6M6cUCLRk41E=
 github.com/oekit/logx v0.8.0/go.mod h1:mU3HRko52yW+XVuJD5ZtiND5zIbBAIZ23Yhu+Mqzy/Q=
 github.com/oekit/metrics v0.1.10 h1:vOniXexctQBZgDjRWXHo6kYmdmpnmluF+MPmd5a5wYg=
@@ -181,8 +181,8 @@ github.com/oekit/registry/nacos v0.1.0 h1:R7ivXPNAsgRYZFPfyqFS52ZJRpW3gs6pLQWo5D
 github.com/oekit/registry/nacos v0.1.0/go.mod h1:Q2qdYp4XJDn157SGgIYcArCkv6Yai44EXxo237cRCT0=
 github.com/oekit/registry/nacosimpl v0.1.0 h1:b6iJBr3owXEITU9krshix66uGLJMbPf4jWrPho6rXAs=
 github.com/oekit/registry/nacosimpl v0.1.0/go.mod h1:Ox7u2cFk9zmJ+4yHvlqG20ZsT8Qdho+AS6EmJIqKKDc=
-github.com/oekit/tracing v0.2.2 h1:czYPRE89kNpz+ekjI0ZmJMqouBQhgYLafq5aq+bkeQ4=
-github.com/oekit/tracing v0.2.2/go.mod h1:NcY/6r11mekF4YK/xGc4kDUxMF2Au5Zx/ecMx6unmeE=
+github.com/oekit/tracing v0.3.2 h1:DpSIQSeetmb4YTfIXUwGM/FEp0hJtmkNv+eLnT4YmzM=
+github.com/oekit/tracing v0.3.2/go.mod h1:LE/MAD/29dHa1/5u1A/Vmiqa+/4dvZJPu+mVJVJXTjg=
 github.com/orcaman/concurrent-map v0.0.0-20210501183033-44dafcb38ecc h1:Ak86L+yDSOzKFa7WM5bf5itSOo1e3Xh8bm5YCMUXIjQ=
 github.com/orcaman/concurrent-map v0.0.0-20210501183033-44dafcb38ecc/go.mod h1:Lu3tH6HLW3feq74c2GC+jIMS/K2CFcDWnWD9XkenwhI=
 github.com/pkg/errors v0.9.1 h1:FEBLx1zS214owpjy7qsBeixbURkuhQAwrK5UwLGTwt4=

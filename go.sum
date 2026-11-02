@@ -161,12 +161,12 @@ github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822/go.mod h1:+n7T8m
 github.com/nacos-group/nacos-sdk-go/v2 v2.3.6-0.20260601044846-0e3d1d099507 h1:f9zIRiraJLY+Ezh9yEKMk1XzhCdAC45+7XbqUaUBX/A=
 github.com/nacos-group/nacos-sdk-go/v2 v2.3.6-0.20260601044846-0e3d1d099507/go.mod h1:ygUBdt7eGeYBt6Lz2HO3wx7crKXk25Mp80568emGMWU=
 github.com/niemeyer/pretty v0.0.0-20200227124842-a10e7caefd8e/go.mod h1:zD1mROLANZcx1PVRCS0qkT7pwLkGfwJo4zjcN/Tysno=
-github.com/oekit/concurrency v0.23.2 h1:1iMfoBe7ti6//IRJoyBlokhUKW0tSEvrQIvb3lEXyvI=
-github.com/oekit/concurrency v0.23.2/go.mod h1:eLMEfucIyKs1cLGK4+lKRQCf3Fgb6EE/mkpPXFMRuMA=
+github.com/oekit/concurrency v0.23.3 h1:9bpofW5VrMWFXyOCwOie/BxIB6RruBD745IG/OU+IKE=
+github.com/oekit/concurrency v0.23.3/go.mod h1:WsSHSOSeVCwK89//4lqvpy/ZKvxolm2IktV+6lPLjCA=
 github.com/oekit/core v0.12.1 h1:RPSr6AdWl3SpFzZ+w2a4C+nhvZr1NSNt8WNjtGotnM0=
 github.com/oekit/core v0.12.1/go.mod h1:HhBTwYHU5MUp9tfNvHjfZv6P4yglQmn4jKmz98dUIsM=
-github.com/oekit/httpx v0.8.7 h1:QqefpNlE4hMbNOdeTZ52OXnvS/5UKWzWc53nkYmVvZ8=
-github.com/oekit/httpx v0.8.7/go.mod h1:rtT9pPf968GqHw4CNexN2wv7X+IQX6JqVMJkkPkCl7E=
+github.com/oekit/httpx v0.8.8 h1:v9lUEWJC9SvRlavkRGdzrGQ2MMSWAty5WOb33WU89CY=
+github.com/oekit/httpx v0.8.8/go.mod h1:7Oq2T3m3B4rJFkqbxf6ohdcp4ABHLrv3b57wNhHfdrE=
 github.com/oekit/logx v0.8.0 h1:S0KQOiI6h4GGktsv0fl1KtHBcOGZZgj6M6cUCLRk41E=
 github.com/oekit/logx v0.8.0/go.mod h1:mU3HRko52yW+XVuJD5ZtiND5zIbBAIZ23Yhu+Mqzy/Q=
 github.com/oekit/metrics v0.1.10 h1:vOniXexctQBZgDjRWXHo6kYmdmpnmluF+MPmd5a5wYg=

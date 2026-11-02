@@ -2,6 +2,10 @@
 
 由 ekit v0.34.0（git.enjoye.top/enjoydream/ekit，冻结维护）拆分而来。所有 notable 变更记录如下。
 
+## [v0.2.9] — 2026-11-02
+
+- build: 矩阵内依赖地板 `concurrency` v0.23.2 → v0.23.3、`httpx` v0.8.7 → v0.8.8（维护轮全量对齐；本版不含 API 变更）
+
 ## [v0.2.8] — 2026-11-02
 
 - build: 矩阵内依赖地板 `pkg` v0.31.0 → v0.31.1（维护轮全量对齐；本版不含 API 变更）

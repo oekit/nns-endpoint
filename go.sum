@@ -165,8 +165,8 @@ github.com/oekit/concurrency v0.25.1 h1:MJ8EqzkTzk282qAOrV1PjzNrxoNo4salrzun7K1z
 github.com/oekit/concurrency v0.25.1/go.mod h1:jcmGKsn824v7RA3+CubaOqXERFJtsLMpgMSaMZOAxjo=
 github.com/oekit/core v0.12.2 h1:HeuiNUQlPvTo/8wNZzsqqKOzow33z1bDKglpOlBWVUo=
 github.com/oekit/core v0.12.2/go.mod h1:HhBTwYHU5MUp9tfNvHjfZv6P4yglQmn4jKmz98dUIsM=
-github.com/oekit/httpx v0.8.9 h1:affLcHFHzi91hi0u9UBeWlWFPjjV56M+e350tMA17c0=
-github.com/oekit/httpx v0.8.9/go.mod h1:MqO9S8meViSe0efiiU7atiTYaWrmFEvSLUqo1HE89e0=
+github.com/oekit/httpx v0.8.10 h1:BeoUTzm2oze0m56VTyuMyGR1CZDgRZ+sFgXQrUfQd2M=
+github.com/oekit/httpx v0.8.10/go.mod h1:cb6hfbxjipB1xVJ4o/mcVVNlGSaELwpkhMhCB0qXgC0=
 github.com/oekit/logx v0.8.3 h1:NPsTpAiGSHyXBT06RUzs577t3PlZquTP+56Q2zZxVSo=
 github.com/oekit/logx v0.8.3/go.mod h1:PImzWIays3sTLxewhKh8wI8xqMlATVJxz6V0ifIgNso=
 github.com/oekit/metrics v0.1.12 h1:7zQTmVF60pIXkNV/lVUVKZLn3VuLxVvx7h0O4fRswl8=

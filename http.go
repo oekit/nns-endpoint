@@ -125,7 +125,9 @@ func (f *HTTPEndpointFactory) MakeEndpoint(serviceName string) (Endpoint, error)
 			return nil, lastErr
 		})
 		if err != nil {
-			if errors.Is(err, gobreaker.ErrOpenState) {
+			// #58：ErrTooManyRequests（half-open 态并发超 MaxRequests）同属
+			// 熔断拒绝，与 ErrOpenState 一并映射（含 ObserveRejected）
+			if errors.Is(err, gobreaker.ErrOpenState) || errors.Is(err, gobreaker.ErrTooManyRequests) {
 				if f.metrics != nil {
 					f.metrics.ObserveRejected(serviceName, httpMetricsKind)
 				}

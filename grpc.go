@@ -127,8 +127,17 @@ func (f *GRPCEndpointFactory) MakeEndpoint(serviceName string, opts ...grpc.Dial
 			return reply, invokeErr
 		})
 
+		// done 回写与 http.go 同构（#57）：本次调用的最终结果确定后回调（含
+		// 熔断出口）——此前只在 pool.Get 失败路径回调一次，Invoke 结果从不
+		// 回写 ⇒ p2c 的节点级 EWMA 恒 0，故障/慢节点永不降权。
+		done(ctx, loadbalance.DoneInfo{Err: err})
+
 		if err != nil {
-			if errors.Is(err, gobreaker.ErrOpenState) {
+			// #58：half-open 态并发超过 MaxRequests 时 gobreaker 返回的是
+			// ErrTooManyRequests（非 ErrOpenState）——同样是熔断拒绝，一并映射
+			// ErrCircuitOpen + 计 ObserveRejected（此前裸透出，消费方的
+			// errors.Is(err, ErrCircuitOpen) 判定失效）。
+			if errors.Is(err, gobreaker.ErrOpenState) || errors.Is(err, gobreaker.ErrTooManyRequests) {
 				if f.metrics != nil {
 					f.metrics.ObserveRejected(serviceName, grpcMetricsKind)
 				}

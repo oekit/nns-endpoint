@@ -2,6 +2,13 @@
 
 由 ekit v0.34.0（git.enjoye.top/enjoydream/ekit，冻结维护）拆分而来。所有 notable 变更记录如下。
 
+## [v0.2.13] — 2026-11-06
+
+- fix(grpc): 调用结果经 DoneFunc 回写——修复 p2c 在 gRPC 路径静默失效（[#57](https://github.com/oekit/nns-endpoint/issues/57)）——`sel.Select` 的 done 回调此前只在 `pool.Get` 失败路径回调一次，`conn.Invoke` 的最终结果（成功/错误）从不回写：httpx loadbalance 的契约是「DoneFunc 在最终结果确定后回调」，p2c 依赖它建节点级 EWMA 并对 Err 计 1s 惩罚——未回写时所有节点 EWMA 恒 0，p2c 每次都落等值随机分支，故障/慢节点永不降权（与宣称语义相反）；对照 HTTP 路径一直正确回写。修法：breaker Execute 之后（成功与错误两路）补 `done(ctx, DoneInfo{Err: err})`，与 http.go 同构
+- fix(grpc+http): `gobreaker.ErrTooManyRequests` 与 `ErrOpenState` 一并映射 `ErrCircuitOpen` + 计 `ObserveRejected`（[#58](https://github.com/oekit/nns-endpoint/issues/58)）——half-open 态并发超 `MaxRequests`（缺省 3）时 gobreaker 返回的是另一个哨兵 ErrTooManyRequests：同属熔断拒绝却被裸透出去，消费方的 `errors.Is(err, ErrCircuitOpen)` 判定失效、指标漏计。两个工厂同步修复
+
+关联问题单：nns-endpoint#57、nns-endpoint#58。
+
 ## [v0.2.12] — 2026-11-06
 
 - build: 矩阵依赖地板对齐（维护轮 #233）

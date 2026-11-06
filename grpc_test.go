@@ -356,4 +356,3 @@ func TestGRPCPool_Touch_ConcurrentReplaceRetry(t *testing.T) {
 
 // guard: the insecure creds must compile (used by pool.create).
 var _ = insecure.NewCredentials
-

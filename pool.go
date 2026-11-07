@@ -24,8 +24,9 @@ type connEntry struct {
 }
 
 // GRPCPool gRPC 连接池，复用 gRPC 客户端连接。
-// 连接数超过 maxSize 时拒绝创建新连接。
-// 空闲超过 idleTTL 的连接在 Get 时自动驱逐。
+// 连接数超过 maxSize 时先全局驱逐空闲超龄条目，仍满则拒绝创建新连接。
+// 空闲超过 idleTTL 的连接在 Get 时自动驱逐（同地址命中与满池创建两条
+// 路径都会驱逐）。
 type GRPCPool struct {
 	mu      sync.RWMutex
 	conns   map[string]*connEntry
@@ -132,7 +133,13 @@ func (p *GRPCPool) create(_ context.Context, addr string, opts ...grpc.DialOptio
 		}
 		delete(p.conns, addr)
 	} else if len(p.conns) >= p.maxSize {
-		return nil, fmt.Errorf("grpc pool: max size %d reached, cannot create new connection to %s", p.maxSize, addr)
+		// 满池先全局驱逐空闲超龄条目再拒绝（#72/#76）：空闲驱逐原本只在
+		// Get(同 addr) 路径生效——滚动发布换 IP 后旧地址连接无人再 Get，
+		// 池被陈旧连接占满时新地址一律 max size reached，扩容实例直接被拒。
+		p.evictIdleLocked()
+		if len(p.conns) >= p.maxSize {
+			return nil, fmt.Errorf("grpc pool: max size %d reached, cannot create new connection to %s", p.maxSize, addr)
+		}
 	}
 
 	defaultOpts := make([]grpc.DialOption, 0, 1+len(opts))
@@ -146,6 +153,21 @@ func (p *GRPCPool) create(_ context.Context, addr string, opts ...grpc.DialOptio
 
 	p.conns[addr] = &connEntry{conn: conn, lastUsed: time.Now()}
 	return conn, nil
+}
+
+// evictIdleLocked 关闭并删除全部空闲超过 idleTTL 的条目（不区分地址，
+// 调用方须持写锁）。与 Get 路径的同地址驱逐语义一致：只看 lastUsed
+// 新鲜度，连接状态由 Get/create 自行复核。
+func (p *GRPCPool) evictIdleLocked() {
+	now := time.Now()
+	for addr, entry := range p.conns {
+		if now.Sub(entry.lastUsed) > p.idleTTL {
+			if err := entry.conn.Close(); err != nil {
+				epLog.Warn("grpc conn close failed on evict", "addr", addr, "err", err)
+			}
+			delete(p.conns, addr)
+		}
+	}
 }
 
 // Close 关闭连接池中的所有 gRPC 连接。

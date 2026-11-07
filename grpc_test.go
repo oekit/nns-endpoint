@@ -354,5 +354,75 @@ func TestGRPCPool_Touch_ConcurrentReplaceRetry(t *testing.T) {
 	<-churnDone
 }
 
-// guard: the insecure creds must compile (used by pool.create).
-var _ = insecure.NewCredentials
+// withTestInsecureCreds 显式传入明文传输凭据（池不再默认注入，见 #77）。
+func withTestInsecureCreds() grpc.DialOption {
+	return grpc.WithTransportCredentials(insecure.NewCredentials())
+}
+
+// TestGRPCPool_Create_FullPoolRejectsWhenNoIdle 覆盖满池拒绝路径的边界：
+// 池满且没有空闲超龄条目可驱逐时，仍直接拒绝（max size reached）。
+func TestGRPCPool_Create_FullPoolRejectsWhenNoIdle(t *testing.T) {
+	pool := NewGRPCPoolWithSize(1)
+	defer pool.Close()
+
+	if _, err := pool.Get(context.Background(), "10.0.0.1:1", withTestInsecureCreds()); err != nil {
+		t.Fatalf("Get first: %v", err)
+	}
+
+	_, err := pool.Get(context.Background(), "10.0.0.2:2", withTestInsecureCreds())
+	if err == nil || !containsAny(err.Error(), "max size") {
+		t.Fatalf("expected max size reached (fresh pool, nothing idle), got: %v", err)
+	}
+}
+
+// TestGRPCPool_Create_FullPoolEvictsIdleOtherAddr 是 #72/#76 的回归测试：
+// 满池创建新地址连接前，必须先全局驱逐**其他地址**的空闲超龄条目。
+// 场景：滚动发布换 IP 后旧地址连接无人再 Get——修复前空闲驱逐只在
+// Get(同 addr) 路径生效，池被陈旧连接占满时新地址一律 max size reached。
+func TestGRPCPool_Create_FullPoolEvictsIdleOtherAddr(t *testing.T) {
+	pool := NewGRPCPoolWithSize(1)
+	defer pool.Close()
+
+	const (
+		addrA = "10.0.0.1:1" // 旧实例（滚动发布后无人再访问）
+		addrB = "10.0.0.2:2" // 服务发现返回的新实例
+	)
+	connA, err := pool.Get(context.Background(), addrA, withTestInsecureCreds())
+	if err != nil {
+		t.Fatalf("Get old addr: %v", err)
+	}
+
+	// A 仍在活跃窗口内：无可驱逐条目，新地址被拒（拒绝语义保持）
+	if _, err := pool.Get(context.Background(), addrB, withTestInsecureCreds()); err == nil || !containsAny(err.Error(), "max size") {
+		t.Fatalf("expected max size reached while old entry fresh, got: %v", err)
+	}
+
+	// 将 A 置为空闲超龄（模拟旧地址长期无人 Get）
+	pool.mu.Lock()
+	pool.conns[addrA].lastUsed = time.Now().Add(-(pool.idleTTL + time.Second))
+	pool.mu.Unlock()
+
+	// 新地址 Get：满池驱逐 A 后创建成功（修复前此处直接 max size reached）
+	connB, err := pool.Get(context.Background(), addrB, withTestInsecureCreds())
+	if err != nil {
+		t.Fatalf("Get new addr after idle expiry: %v", err)
+	}
+	if connB == nil {
+		t.Fatal("Get new addr returned nil conn")
+	}
+
+	// A 已被驱逐关闭且条目删除，池内只剩新地址
+	pool.mu.RLock()
+	_, hasA := pool.conns[addrA]
+	_, hasB := pool.conns[addrB]
+	pool.mu.RUnlock()
+	if hasA {
+		t.Error("expected idle old-addr entry to be evicted, still in pool")
+	}
+	if !hasB {
+		t.Error("expected new-addr entry in pool")
+	}
+	if state := connA.GetState(); state != connectivity.Shutdown {
+		t.Errorf("expected evicted old conn Shutdown, got %v", state)
+	}
+}

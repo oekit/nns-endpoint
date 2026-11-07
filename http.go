@@ -75,7 +75,10 @@ func resolveCallTimeout(serviceName string, reqTimeout time.Duration, readTimeou
 // opts 定制 per-service 熔断参数（WithBreakerSettings）、弹性指标
 // （WithMetrics）等行为。
 func NewHTTPEndpointFactory(c *nnsclient.ServiceClient, opts ...EndpointFactoryOption) *HTTPEndpointFactory {
-	httpClient := httpx.NewClient("nns-http",
+	// httpx v0.8.12 起 NewClient 显式返回 error（httpx#83）；本工厂的
+	// options 固定且不可能构造冲突（无 WithEndpoints/WithNNS 组合面），
+	// 走 MustNewClient 逃生舱（panic 仅初始化期可达，语义同旧版）。
+	httpClient := httpx.MustNewClient("nns-http",
 		httpx.WithTimeout(30*time.Second),
 		httpx.WithTracePropagation(),
 	)

@@ -14,16 +14,17 @@
 - `pkg` 是**零第三方依赖仓**（go.mod 零 require，仅标准库，CI 强制）——需要三方能力的基础工具拆独立仓（先例：kitx）
 
 ### 错误处理
-- 一律使用 `github.com/oekit/pkg/errors`：`errors.Wrap(err, "ctx", kv...)`（nil-safe）、
-  `errors.Cause`；业务错误用 BizError（BizCode 与 HTTPCode 双轨，命名工厂 NewNotFoundError 等）
-- **类型同一性红线**：同一进程内只允许一套 errors 包。混用旧路径会把 BizError 的 As/Is
-  判定打断（Not Found 变 500）
+- 业务错误（需 BizCode/HTTPCode 双轨、可被 As/Is 判定）统一用
+  `github.com/oekit/pkg/errors` 的 BizError（命名工厂 NewNotFoundError 等）
+- 普通错误包装允许 stdlib：`fmt.Errorf("...: %w", err)` / `errors.New`
+- BizError 载体同一进程只此一套：混入其他 BizError 实现会打断 As/Is 判定（Not Found 变 500）
 - handler 层统一 `mw.Fail(ctx, c, err)` 出口；所有 error 禁止 `_` 忽略
 
 ### 日志
 - 门面 `github.com/oekit/logx`：业务服务 `logx.WithService("svc")`；
   **SDK/基础包必须 `logx.Delegating("组件名")` 懒解析**（禁止 Default()/WithService 声明包级 logger）
 - kv 结构化风格为默认；`Ctx*` 方法自动携带 trace_id；禁止 printf 风格 `logx.Infof` 作为主要手段
+- 错误字段名统一用 `logx.ErrKey` 常量（值 "err"），禁止手写 "err"/"error" 字面量（两矩阵落同一 Loki/ES）
 - 后端经 `logx.SetDefault` 替换；`LOG_LEVEL` 环境变量统一生效
 
 ### 并发安全
@@ -38,6 +39,11 @@
 ### Option 与命名
 - 函数选项模式 `XxxOption`（禁止裸 `Option`，多包 co-import 冲突）
 - 导出符号 PascalCase + godoc 注释；包文档放 doc.go
+- Option 非法值总则：① 构造期非法值 fail-fast（panic 或返回 error，同仓内保持一致）；
+  ② nil 参数 = 显式回退默认值，不算非法；③ 运行期不可恢复错误显式上抛，不静默
+
+### 超时默认值
+- 探测类 ≤10s、治理类 ≤60s、后台任务 ≤10min；跨区间取值须在包文档声明理由
 
 ### 版本与发版
 - SemVer；0.x 阶段 minor 允许 breaking

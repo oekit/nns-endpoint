@@ -404,7 +404,7 @@ func TestGRPCPool_Create_FullPoolEvictsIdleOtherAddr(t *testing.T) {
 	}
 
 	// A 仍在活跃窗口内：无可驱逐条目，新地址被拒（拒绝语义保持）
-	if _, err := pool.Get(context.Background(), addrB, withTestInsecureCreds()); err == nil || !containsAny(err.Error(), "max size") {
+	if _, err = pool.Get(context.Background(), addrB, withTestInsecureCreds()); err == nil || !containsAny(err.Error(), "max size") {
 		t.Fatalf("expected max size reached while old entry fresh, got: %v", err)
 	}
 

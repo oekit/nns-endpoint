@@ -46,6 +46,31 @@ type HTTPEndpointFactory struct {
 // metricsKind 是本工厂在弹性指标里的 kind 标签值。
 const httpMetricsKind = "nns-http"
 
+// defaultCallTimeout 是单次调用的兜底超时（#75）。
+//
+// 此前 req.Timeout 与服务治理 ServiceBasic.ReadTimeout 两级均为 0 时
+// （治理配置漏配 readTimeout 很常见），得到 context.WithTimeout(ctx, 0)
+// ——每个请求立即 DeadlineExceeded，错误形态酷似「后端超时」，排障方向
+// 完全被带偏。取 30s，与 HTTP 工厂 httpx.WithTimeout(30s) 的客户端默认
+// 对齐；命中兜底时记 Warn 提示补配。
+const defaultCallTimeout = 30 * time.Second
+
+// resolveCallTimeout 解析单次调用超时：显式 reqTimeout 优先，其次服务治理
+// readTimeoutMS（毫秒）；两者均未配置（≤0）时回退 defaultCallTimeout。
+// HTTP/gRPC 两条路径共用，保证兜底语义不漂移。
+func resolveCallTimeout(serviceName string, reqTimeout time.Duration, readTimeoutMS int) time.Duration {
+	timeout := reqTimeout
+	if timeout == 0 {
+		timeout = time.Duration(readTimeoutMS) * time.Millisecond
+	}
+	if timeout <= 0 {
+		epLog.Warn("call timeout unresolved (req.Timeout=0 and ServiceBasic.ReadTimeout<=0), fallback to default",
+			"service", serviceName, "fallback", defaultCallTimeout.String())
+		return defaultCallTimeout
+	}
+	return timeout
+}
+
 // NewHTTPEndpointFactory 根据服务客户端创建 HTTP 端点工厂实例。
 // opts 定制 per-service 熔断参数（WithBreakerSettings）、弹性指标
 // （WithMetrics）等行为。
@@ -98,10 +123,9 @@ func (f *HTTPEndpointFactory) MakeEndpoint(serviceName string) (Endpoint, error)
 		if retry < 0 {
 			retry = 0
 		}
-		timeout := req.Timeout
-		if timeout == 0 {
-			timeout = time.Duration(basic.ReadTimeout) * time.Millisecond
-		}
+		// #75：两级超时均缺配（0）时兜底 defaultCallTimeout，而非
+		// WithTimeout(ctx, 0) 的立即 DeadlineExceeded
+		timeout := resolveCallTimeout(serviceName, req.Timeout, basic.ReadTimeout)
 
 		result, err := f.breakers.getOrCreate(serviceName).Execute(func() (any, error) {
 			var lastErr error

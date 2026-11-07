@@ -8,7 +8,6 @@ import (
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/connectivity"
-	"google.golang.org/grpc/credentials/insecure"
 )
 
 // defaultMaxPoolSize 是连接池默认最大连接数。
@@ -24,8 +23,14 @@ type connEntry struct {
 }
 
 // GRPCPool gRPC 连接池，复用 gRPC 客户端连接。
-// 连接数超过 maxSize 时拒绝创建新连接。
-// 空闲超过 idleTTL 的连接在 Get 时自动驱逐。
+// 连接数超过 maxSize 时先全局驱逐空闲超龄条目，仍满则拒绝创建新连接。
+// 空闲超过 idleTTL 的连接在 Get 时自动驱逐（同地址命中与满池创建两条
+// 路径都会驱逐）。
+//
+// 传输凭据（#77）：池**不注入**默认凭据——调用方必须经 opts 显式传入
+// grpc.WithTransportCredentials(insecure.NewCredentials())（明文）或 TLS
+// 凭据。缺凭据时 grpc.NewClient 返回 "no transport security set" 错误
+// （fail-closed），不再静默降级明文。
 type GRPCPool struct {
 	mu      sync.RWMutex
 	conns   map[string]*connEntry
@@ -55,6 +60,8 @@ func NewGRPCPoolWithSize(maxSize int) *GRPCPool {
 }
 
 // Get 从连接池获取指定地址的 gRPC 连接，不存在、已关闭或空闲超时时创建新连接。
+// opts 透传给 grpc.NewClient；必须包含传输凭据（明文 insecure / TLS），
+// 缺凭据时返回 grpc 的 no transport security set 错误（#77）。
 //
 // 并发安全说明：读锁读取 entry 与写锁校验之间存在窗口，期间该 entry 可能被
 // 并发驱逐（Close 后删除）或替换。因此返回前必须在写锁内校验 p.conns[addr]
@@ -132,20 +139,39 @@ func (p *GRPCPool) create(_ context.Context, addr string, opts ...grpc.DialOptio
 		}
 		delete(p.conns, addr)
 	} else if len(p.conns) >= p.maxSize {
-		return nil, fmt.Errorf("grpc pool: max size %d reached, cannot create new connection to %s", p.maxSize, addr)
+		// 满池先全局驱逐空闲超龄条目再拒绝（#72/#76）：空闲驱逐原本只在
+		// Get(同 addr) 路径生效——滚动发布换 IP 后旧地址连接无人再 Get，
+		// 池被陈旧连接占满时新地址一律 max size reached，扩容实例直接被拒。
+		p.evictIdleLocked()
+		if len(p.conns) >= p.maxSize {
+			return nil, fmt.Errorf("grpc pool: max size %d reached, cannot create new connection to %s", p.maxSize, addr)
+		}
 	}
 
-	defaultOpts := make([]grpc.DialOption, 0, 1+len(opts))
-	defaultOpts = append(defaultOpts, grpc.WithTransportCredentials(insecure.NewCredentials()))
-	defaultOpts = append(defaultOpts, opts...)
-
-	conn, err := grpc.NewClient(addr, defaultOpts...)
+	conn, err := grpc.NewClient(addr, opts...)
 	if err != nil {
-		return nil, err
+		// 典型触发是未显式传传输凭据（#77）：grpc 的 errNoTransportSecurity
+		// 已自带修复指引（显式 WithTransportCredentials），这里补地址上下文。
+		return nil, fmt.Errorf("grpc pool: create conn to %s: %w", addr, err)
 	}
 
 	p.conns[addr] = &connEntry{conn: conn, lastUsed: time.Now()}
 	return conn, nil
+}
+
+// evictIdleLocked 关闭并删除全部空闲超过 idleTTL 的条目（不区分地址，
+// 调用方须持写锁）。与 Get 路径的同地址驱逐语义一致：只看 lastUsed
+// 新鲜度，连接状态由 Get/create 自行复核。
+func (p *GRPCPool) evictIdleLocked() {
+	now := time.Now()
+	for addr, entry := range p.conns {
+		if now.Sub(entry.lastUsed) > p.idleTTL {
+			if err := entry.conn.Close(); err != nil {
+				epLog.Warn("grpc conn close failed on evict", "addr", addr, "err", err)
+			}
+			delete(p.conns, addr)
+		}
+	}
 }
 
 // Close 关闭连接池中的所有 gRPC 连接。

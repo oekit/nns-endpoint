@@ -14,6 +14,7 @@ import (
 	"github.com/oekit/registry"
 	"github.com/sony/gobreaker"
 	"google.golang.org/grpc"
+	"google.golang.org/protobuf/proto"
 )
 
 // GRPCRequest gRPC 端点请求参数。
@@ -21,8 +22,20 @@ type GRPCRequest struct {
 	ServiceName     string
 	GrpcServiceName string
 	Method          string
-	Request         any
-	Timeout         time.Duration
+	// Request 是请求消息，必须实现 proto.Message（默认 proto codec 只
+	// 接受该类型）。不满足时端点在发起调用前直接报错，而不是让编解码
+	// 失败发生在 Invoke 深处、错误形态晦涩。
+	Request any
+	// Reply 是接收响应的类型化消息指针，由调用方传入（如
+	// &helloworld.HelloReply{}），端点的返回值就是它。必填。
+	//
+	// #71/#73：此前解码目标是 var reply any（&reply 是 *any），默认
+	// proto codec 的 Unmarshal 要求 proto.Message，类型化响应永远拿
+	// 不到——gRPC happy path 从未跑通过。
+	Reply proto.Message
+	// Timeout 是单次调用超时；0 时回退服务治理 ReadTimeout，两级均
+	// 未配置时兜底 defaultCallTimeout（#75）。
+	Timeout time.Duration
 }
 
 // GRPCEndpointFactory gRPC 端点工厂，负责创建 gRPC 端点并管理连接池和熔断器。
@@ -73,11 +86,27 @@ func (f *GRPCEndpointFactory) ResetSelector(serviceName string) {
 
 // MakeEndpoint 为指定服务创建 gRPC 端点，包含负载均衡、连接池和熔断逻辑。
 // balancer 与熔断器在闭包内按调用获取，ResetBalancer/配置热更对存量端点生效。
+//
+// 传输安全（#77）：opts 必须显式包含传输凭据——明文传
+// grpc.WithTransportCredentials(insecure.NewCredentials())，TLS 传对应
+// TransportCredentials。连接池不再默认注入 insecure 凭据，缺凭据的
+// 调用会得到 grpc 的 "no transport security set" 错误（此前是静默明文）。
 func (f *GRPCEndpointFactory) MakeEndpoint(serviceName string, opts ...grpc.DialOption) (Endpoint, error) {
 	return func(ctx context.Context, request any) (any, error) {
 		req, ok := request.(GRPCRequest)
 		if !ok {
 			return nil, fmt.Errorf("invalid request type, expected GRPCRequest")
+		}
+
+		// #71/#73：默认 proto codec 只接受 proto.Message。请求/响应的
+		// 类型约束在发起调用前校验，缺 Reply 或 Request 非 proto 消息
+		// 直接报配置性错误，而不是把裸 *any 塞给 Invoke 在 codec 深处
+		// 报晦涩的编解码错误（响应此前永远拿不到）。
+		if req.Reply == nil {
+			return nil, fmt.Errorf("GRPCRequest.Reply must be a non-nil proto.Message pointer (e.g. &helloworld.HelloReply{}) to receive the response")
+		}
+		if _, ok := req.Request.(proto.Message); !ok {
+			return nil, fmt.Errorf("invalid request type %T: gRPC request must implement proto.Message", req.Request)
 		}
 
 		instances, err := f.client.GetInstances(ctx, serviceName)
@@ -110,11 +139,9 @@ func (f *GRPCEndpointFactory) MakeEndpoint(serviceName string, opts ...grpc.Dial
 			return nil, fmt.Errorf("get grpc conn: %w", err)
 		}
 
-		timeout := req.Timeout
-		if timeout == 0 {
-			basic := f.client.GetServiceBasic(serviceName)
-			timeout = time.Duration(basic.ReadTimeout) * time.Millisecond
-		}
+		// #75：两级超时均缺配（0）时兜底 defaultCallTimeout，而非
+		// WithTimeout(ctx, 0) 的立即 DeadlineExceeded
+		timeout := resolveCallTimeout(serviceName, req.Timeout, f.client.GetServiceBasic(serviceName).ReadTimeout)
 
 		callCtx, cancel := context.WithTimeout(ctx, timeout)
 		defer cancel()
@@ -122,9 +149,9 @@ func (f *GRPCEndpointFactory) MakeEndpoint(serviceName string, opts ...grpc.Dial
 		fullMethod := fmt.Sprintf("/%s/%s", req.GrpcServiceName, req.Method)
 
 		result, err := f.breakers.getOrCreate(serviceName).Execute(func() (any, error) {
-			var reply any
-			invokeErr := conn.Invoke(callCtx, fullMethod, req.Request, &reply)
-			return reply, invokeErr
+			// 解码目标是调用方传入的类型化 Reply 指针（#71/#73）
+			invokeErr := conn.Invoke(callCtx, fullMethod, req.Request, req.Reply)
+			return req.Reply, invokeErr
 		})
 
 		// done 回写与 http.go 同构（#57）：本次调用的最终结果确定后回调（含

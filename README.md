@@ -33,6 +33,38 @@ ep, _ := factory.MakeEndpoint("payment-svc")
 resp, err := ep(ctx, req) // 背后：发现 + 熔断 + 换实例重试
 ```
 
+## gRPC 调用
+
+```go
+import (
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
+
+	endpoint "github.com/oekit/nns-endpoint"
+)
+
+grpcFactory := endpoint.NewGRPCEndpointFactory(nnsc.ServiceClient())
+ep, _ := grpcFactory.MakeEndpoint("user-svc",
+	grpc.WithTransportCredentials(insecure.NewCredentials())) // 传输凭据必须显式传入（#77）
+
+reply := &userv1.GetUserReply{}
+_, err := ep(ctx, endpoint.GRPCRequest{
+	GrpcServiceName: "userv1.UserService",
+	Method:          "GetUser",
+	Request:         &userv1.GetUserRequest{Id: 42},
+	Reply:           reply, // 类型化响应指针，端点返回值即它（#71/#73）
+})
+```
+
+- **传输凭据不设默认值（#77）**：明文必须显式声明
+  `grpc.WithTransportCredentials(insecure.NewCredentials())`，TLS 场景传对应
+  TransportCredentials；缺凭据直接得到 grpc 的 `no transport security set`
+  错误，绝不静默降级明文。
+- **`Reply` 必填**（proto.Message 指针）：默认 proto codec 无法向裸 `any`
+  解码，响应解码目标是调用方传入的类型化指针（#71/#73）。
+- 单次调用超时：`GRPCRequest.Timeout` > 服务治理 `readTimeout`（毫秒）>
+  兜底 30s——两级均缺配不再立即 `DeadlineExceeded`（#75）。
+
 ## 边界
 
 - 依赖 [nns](https://github.com/oekit/nns) 的 `ServiceClient()`、[httpx](https://github.com/oekit/httpx) 的发现/负载均衡

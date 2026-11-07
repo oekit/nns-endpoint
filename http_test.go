@@ -414,6 +414,52 @@ func TestHTTPEndpoint_Close(t *testing.T) {
 	factory.Close() // should not panic
 }
 
+// TestHTTPEndpoint_TimeoutFallbackWhenUnset 覆盖 #75：req.Timeout 与服务治理
+// ReadTimeout 均为 0 时，请求必须以 defaultCallTimeout 兜底正常完成，而不是
+// 立即 DeadlineExceeded（修复前错误形态酷似「后端超时」，排障方向被带偏）。
+func TestHTTPEndpoint_TimeoutFallbackWhenUnset(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, `{"ok":true}`)
+	}))
+	t.Cleanup(srv.Close)
+
+	host, port := parseHostPort(srv.URL)
+	c := nnsclient.New(
+		nnsclient.WithMockMode(true),
+		nnsclient.WithStaticInstances("svc-a", []registry.Instance{
+			{IP: host, Port: port},
+		}),
+		nnsclient.WithLocalServiceConfig("svc-a", &metadata.ServiceBasic{
+			ConnectionConfig: metadata.ConnectionConfig{
+				ReadTimeout: 0, // 漏配：两级超时均未设置
+				Lb:          metadata.LbRoundRobin,
+			},
+		}),
+	)
+	factory := NewHTTPEndpointFactory(c)
+	defer factory.Close()
+
+	ep, err := factory.MakeEndpoint("svc-a")
+	if err != nil {
+		t.Fatalf("MakeEndpoint: %v", err)
+	}
+
+	var got map[string]any
+	_, err = ep(context.Background(), HTTPRequest{
+		Method: http.MethodGet,
+		Path:   "/ok",
+		Result: &got,
+		// Timeout 不设：触发两级缺配的兜底路径
+	})
+	if err != nil {
+		t.Fatalf("endpoint call should succeed via default timeout fallback, got: %v", err)
+	}
+	if got["ok"] != true {
+		t.Errorf("expected ok=true, got %v", got)
+	}
+}
+
 // containsAny is a small strings.Contains helper kept inline to avoid
 // importing strings for a single use.
 func containsAny(s, sub string) bool {

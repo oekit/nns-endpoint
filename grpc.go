@@ -110,11 +110,9 @@ func (f *GRPCEndpointFactory) MakeEndpoint(serviceName string, opts ...grpc.Dial
 			return nil, fmt.Errorf("get grpc conn: %w", err)
 		}
 
-		timeout := req.Timeout
-		if timeout == 0 {
-			basic := f.client.GetServiceBasic(serviceName)
-			timeout = time.Duration(basic.ReadTimeout) * time.Millisecond
-		}
+		// #75：两级超时均缺配（0）时兜底 defaultCallTimeout，而非
+		// WithTimeout(ctx, 0) 的立即 DeadlineExceeded
+		timeout := resolveCallTimeout(serviceName, req.Timeout, f.client.GetServiceBasic(serviceName).ReadTimeout)
 
 		callCtx, cancel := context.WithTimeout(ctx, timeout)
 		defer cancel()

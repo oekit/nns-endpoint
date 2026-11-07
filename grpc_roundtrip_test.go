@@ -12,7 +12,9 @@ import (
 
 	"github.com/oekit/httpx/loadbalance"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
 	"google.golang.org/grpc/test/bufconn"
 	"google.golang.org/protobuf/types/known/wrapperspb"
 )
@@ -152,6 +154,50 @@ func TestGRPCEndpoint_InvokeRoundTrip(t *testing.T) {
 	}
 	if errs[0] != nil {
 		t.Errorf("expected done with nil err on success, got %v", errs[0])
+	}
+}
+
+// TestGRPCEndpoint_InvokeFailureReportsDone 锁定 #74 的行为：RPC 失败
+// （conn.Invoke 返回错误）时 selector 的 done 必须带错误回写——p2c 的
+// EWMA 故障惩罚依赖该样本，失败节点才会降权。修复已随 #57（becc834）
+// 落地 main（此前 Invoke 失败直接 return、从不回调 done），本测试补齐
+// gRPC 失败路径的回归覆盖。
+func TestGRPCEndpoint_InvokeFailureReportsDone(t *testing.T) {
+	dialOpts := newBufconnGRPCServer(t, "nns.test.EchoService", map[string]func(ctx context.Context, req *wrapperspb.StringValue) (*wrapperspb.StringValue, error){
+		"Boom": func(_ context.Context, _ *wrapperspb.StringValue) (*wrapperspb.StringValue, error) {
+			return nil, status.Error(codes.Internal, "boom")
+		},
+	})
+
+	rec := &recordingSelector{}
+	factory := newGRPCFactoryWithBufconn(t, dialOpts, WithSelector(rec))
+	defer factory.Close()
+
+	ep, err := factory.MakeEndpoint("svc-a", dialOpts...)
+	if err != nil {
+		t.Fatalf("MakeEndpoint: %v", err)
+	}
+
+	_, err = ep(context.Background(), GRPCRequest{
+		GrpcServiceName: "nns.test.EchoService",
+		Method:          "Boom",
+		Request:         wrapperspb.String("x"),
+		Reply:           &wrapperspb.StringValue{},
+	})
+	if err == nil {
+		t.Fatal("expected Invoke failure to propagate, got nil")
+	}
+	if !containsAny(err.Error(), "boom") {
+		t.Errorf("expected server error to surface, got: %v", err)
+	}
+
+	// 失败样本必须恰好回写一次且携带错误（#74）
+	errs := rec.doneErrs()
+	if len(errs) != 1 {
+		t.Fatalf("expected exactly 1 done callback on failure, got %d", len(errs))
+	}
+	if errs[0] == nil {
+		t.Error("expected done callback to receive the Invoke error, got nil")
 	}
 }
 

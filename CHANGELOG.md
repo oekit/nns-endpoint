@@ -2,6 +2,17 @@
 
 由 ekit v0.34.0（git.enjoye.top/enjoydream/ekit，冻结维护）拆分而来。所有 notable 变更记录如下。
 
+## [v0.2.14] — 2026-11-07
+
+- feat(grpc): GRPCRequest.Reply 类型化解码目标——调用方传入 proto.Message 指针，Invoke 不再对 var reply any 解码（#71 #73）
+- fix(pool): 满池先全局驱逐空闲超龄连接再拒绝——滚动发布换 IP 场景新地址不再被陈旧连接顶死（#72 #76）
+- fix(endpoint): 超时下限与兜底链（显式 Timeout > ReadTimeout > 30s 兜底+Warn）——req.Timeout=0 不再立即 DeadlineExceeded（#75）
+- fix(grpc): Invoke 失败路径回写 selector done（修复已随 #57 合入，本轮补失败路径回归钉）（#74）
+- fix(pool): 默认不再注入 insecure 凭据——缺凭据显式报错，TLS 场景显式二选一（BREAKING，PR #78）（#77）
+- fix(http): 适配 httpx v0.8.12 NewClient 两值签名——固定 options 走 MustNewClient 逃生舱（httpx#83 BREAKING 后续）
+
+关联问题单：nns-endpoint#71、nns-endpoint#72、nns-endpoint#73、nns-endpoint#74、nns-endpoint#75、nns-endpoint#76、nns-endpoint#77。
+
 ## [v0.2.13] — 2026-11-06
 
 - fix(grpc): 调用结果经 DoneFunc 回写——修复 p2c 在 gRPC 路径静默失效（[#57](https://github.com/oekit/nns-endpoint/issues/57)）——`sel.Select` 的 done 回调此前只在 `pool.Get` 失败路径回调一次，`conn.Invoke` 的最终结果（成功/错误）从不回写：httpx loadbalance 的契约是「DoneFunc 在最终结果确定后回调」，p2c 依赖它建节点级 EWMA 并对 Err 计 1s 惩罚——未回写时所有节点 EWMA 恒 0，p2c 每次都落等值随机分支，故障/慢节点永不降权（与宣称语义相反）；对照 HTTP 路径一直正确回写。修法：breaker Execute 之后（成功与错误两路）补 `done(ctx, DoneInfo{Err: err})`，与 http.go 同构

@@ -21,7 +21,7 @@ func TestGRPCPool_Get_CachesConnection(t *testing.T) {
 	// Use a real routable address (127.0.0.1:0 is a kernel-chosen port —
 	// not a real server, but NewClient is non-blocking, so this works
 	// for the caching test).
-	conn1, err := pool.Get(context.Background(), "127.0.0.1:0")
+	conn1, err := pool.Get(context.Background(), "127.0.0.1:0", withTestInsecureCreds())
 	if err != nil {
 		t.Fatalf("Get first: %v", err)
 	}
@@ -30,7 +30,7 @@ func TestGRPCPool_Get_CachesConnection(t *testing.T) {
 	}
 	defer conn1.Close()
 
-	conn2, err := pool.Get(context.Background(), "127.0.0.1:0")
+	conn2, err := pool.Get(context.Background(), "127.0.0.1:0", withTestInsecureCreds())
 	if err != nil {
 		t.Fatalf("Get second: %v", err)
 	}
@@ -46,13 +46,13 @@ func TestGRPCPool_Get_DifferentAddressDifferentConn(t *testing.T) {
 	pool := NewGRPCPool()
 	defer pool.Close()
 
-	conn1, err := pool.Get(context.Background(), "127.0.0.1:0")
+	conn1, err := pool.Get(context.Background(), "127.0.0.1:0", withTestInsecureCreds())
 	if err != nil {
 		t.Fatalf("Get first: %v", err)
 	}
 	defer conn1.Close()
 
-	conn2, err := pool.Get(context.Background(), "127.0.0.1:1")
+	conn2, err := pool.Get(context.Background(), "127.0.0.1:1", withTestInsecureCreds())
 	if err != nil {
 		t.Fatalf("Get second: %v", err)
 	}
@@ -77,6 +77,7 @@ func TestGRPCPool_Get_RespectsExtraOptions(t *testing.T) {
 	}
 
 	conn, err := pool.Get(context.Background(), "127.0.0.1:0",
+		withTestInsecureCreds(),
 		grpc.WithUnaryInterceptor(interceptor),
 	)
 	if err != nil {
@@ -97,7 +98,7 @@ func TestGRPCPool_Get_RespectsExtraOptions(t *testing.T) {
 func TestGRPCPool_Close_ClearsAllConnections(t *testing.T) {
 	pool := NewGRPCPool()
 
-	conn1, err := pool.Get(context.Background(), "127.0.0.1:0")
+	conn1, err := pool.Get(context.Background(), "127.0.0.1:0", withTestInsecureCreds())
 	if err != nil {
 		t.Fatalf("Get before close: %v", err)
 	}
@@ -112,7 +113,7 @@ func TestGRPCPool_Close_ClearsAllConnections(t *testing.T) {
 
 	// A new Get for the same address must succeed and return a new conn
 	// (not the closed one).
-	conn2, err := pool.Get(context.Background(), "127.0.0.1:0")
+	conn2, err := pool.Get(context.Background(), "127.0.0.1:0", withTestInsecureCreds())
 	if err != nil {
 		t.Fatalf("Get after close: %v", err)
 	}
@@ -122,17 +123,27 @@ func TestGRPCPool_Close_ClearsAllConnections(t *testing.T) {
 	}
 }
 
-// TestGRPCPool_Get_NoInsecurePanic verifies the default creds path.
-// Without insecure.NewCredentials(), grpc.NewClient panics in modern
-// versions. The pool must always include the default.
-func TestGRPCPool_Get_NoInsecurePanic(t *testing.T) {
+// TestGRPCPool_Get_RequiresExplicitCredentials 是 #77 的回归测试：
+// 池不再默认注入 insecure 凭据——不传传输凭据必须得到 grpc 的
+// "no transport security set" 错误（fail-closed，静默明文才是缺陷），
+// 显式传入 insecure 凭据则正常建连。
+func TestGRPCPool_Get_RequiresExplicitCredentials(t *testing.T) {
 	pool := NewGRPCPool()
 	defer pool.Close()
 
-	// Should not panic; should return a non-nil conn.
-	conn, err := pool.Get(context.Background(), "127.0.0.1:0")
+	// 不传凭据：显式报错，而非静默明文
+	_, err := pool.Get(context.Background(), "127.0.0.1:0")
+	if err == nil {
+		t.Fatal("expected no-transport-security error, got nil")
+	}
+	if !containsAny(err.Error(), "no transport security set") {
+		t.Errorf("expected 'no transport security set' error, got: %v", err)
+	}
+
+	// 显式明文凭据：正常返回连接
+	conn, err := pool.Get(context.Background(), "127.0.0.1:0", withTestInsecureCreds())
 	if err != nil {
-		t.Fatalf("Get: %v", err)
+		t.Fatalf("Get with explicit insecure creds: %v", err)
 	}
 	if conn == nil {
 		t.Fatal("Get returned nil conn without error")
@@ -147,7 +158,7 @@ func TestGRPCPool_Get_AfterShutdownRecreates(t *testing.T) {
 	pool := NewGRPCPool()
 	defer pool.Close()
 
-	conn1, err := pool.Get(context.Background(), "127.0.0.1:0")
+	conn1, err := pool.Get(context.Background(), "127.0.0.1:0", withTestInsecureCreds())
 	if err != nil {
 		t.Fatalf("Get first: %v", err)
 	}
@@ -155,7 +166,7 @@ func TestGRPCPool_Get_AfterShutdownRecreates(t *testing.T) {
 	// pool should detect the Shutdown state on the next Get and recreate.
 	conn1.Close()
 
-	conn2, err := pool.Get(context.Background(), "127.0.0.1:0")
+	conn2, err := pool.Get(context.Background(), "127.0.0.1:0", withTestInsecureCreds())
 	if err != nil {
 		t.Fatalf("Get after conn close: %v", err)
 	}
@@ -210,7 +221,7 @@ func TestGRPCEndpoint_Close(t *testing.T) {
 	c := newTestServiceClient(t)
 	factory := NewGRPCEndpointFactory(c)
 	// Pre-populate the pool with a connection.
-	conn, err := factory.pool.Get(context.Background(), "127.0.0.1:0")
+	conn, err := factory.pool.Get(context.Background(), "127.0.0.1:0", withTestInsecureCreds())
 	if err != nil {
 		t.Fatalf("pool.Get: %v", err)
 	}
@@ -219,7 +230,7 @@ func TestGRPCEndpoint_Close(t *testing.T) {
 	// After Close, the pool's internal map should be empty.
 	// We can't directly inspect the map (unexported), but a new Get
 	// must return a new conn.
-	conn2, err := factory.pool.Get(context.Background(), "127.0.0.1:0")
+	conn2, err := factory.pool.Get(context.Background(), "127.0.0.1:0", withTestInsecureCreds())
 	if err != nil {
 		t.Fatalf("pool.Get after Close: %v", err)
 	}
@@ -338,7 +349,7 @@ func TestGRPCPool_Touch_ConcurrentReplaceRetry(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for i := 0; i < getsPerGoroutine; i++ {
-				conn, err := pool.Get(context.Background(), addr)
+				conn, err := pool.Get(context.Background(), addr, withTestInsecureCreds())
 				if err != nil {
 					t.Errorf("Get: %v", err)
 					return

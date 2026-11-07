@@ -86,6 +86,11 @@ func (f *GRPCEndpointFactory) ResetSelector(serviceName string) {
 
 // MakeEndpoint 为指定服务创建 gRPC 端点，包含负载均衡、连接池和熔断逻辑。
 // balancer 与熔断器在闭包内按调用获取，ResetBalancer/配置热更对存量端点生效。
+//
+// 传输安全（#77）：opts 必须显式包含传输凭据——明文传
+// grpc.WithTransportCredentials(insecure.NewCredentials())，TLS 传对应
+// TransportCredentials。连接池不再默认注入 insecure 凭据，缺凭据的
+// 调用会得到 grpc 的 "no transport security set" 错误（此前是静默明文）。
 func (f *GRPCEndpointFactory) MakeEndpoint(serviceName string, opts ...grpc.DialOption) (Endpoint, error) {
 	return func(ctx context.Context, request any) (any, error) {
 		req, ok := request.(GRPCRequest)

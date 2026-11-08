@@ -2,6 +2,8 @@ package endpoint
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"sync"
 
 	"github.com/oekit/httpx/loadbalance"
@@ -34,7 +36,16 @@ func newSelectorCache(client *nnsclient.ServiceClient, injected loadbalance.Sele
 // ctx 透传给首建的 Nacos 配置查询：慢路径发生在请求路径上
 // （MakeEndpoint 闭包首建/热更重置后首次调用），必须跟随请求的
 // 超时与取消，避免挂死的配置拉取阻塞调用方请求。
-// 服务配置的策略名不可识别时回退 roundrobin。
+//
+// 配置读取（#98）：首建用 ServiceConfig（真实错误面）而非
+// ServiceWithName（软降级）——瞬时配置拉取失败若静默取默认值，产出
+// roundrobin selector 进缓存后没有失败豁免（无 TTL、无重试标记），只有
+// 配置变更事件或 ResetSelector 会重建，配置的 p2c 等自适应策略在热更前
+// 永不生效。失败时不写缓存直接报错，下次调用重试首建。
+// 仅两类情况允许稳定回退 roundrobin 并写缓存：
+//   - 配置真实存在但策略名不可识别（确定性决策，回退安全）；
+//   - 未接入配置中心（ErrConfigStoreUnavailable，本就无配置可拉，
+//     与 ServiceWithName 的旧行为一致）。
 func (c *selectorCache) getOrCreate(ctx context.Context, serviceName string) (loadbalance.Selector, error) {
 	// 快速路径：读锁查缓存
 	c.mu.RLock()
@@ -49,7 +60,12 @@ func (c *selectorCache) getOrCreate(ctx context.Context, serviceName string) (lo
 	if c.injected != nil {
 		s = c.injected
 	} else {
-		basic := c.client.ServiceWithName(ctx, serviceName)
+		basic, err := c.client.ServiceConfig(ctx, serviceName)
+		if err != nil && !errors.Is(err, nnsclient.ErrConfigStoreUnavailable) {
+			// 配置拉取失败/JSON 损坏：不写缓存，本次调用显式失败，
+			// 下次调用重试首建（配置恢复后 p2c 等策略即正常生效）
+			return nil, fmt.Errorf("get service config: %w", err)
+		}
 		created, err := loadbalance.NewSelector(loadbalance.NormalizeSelectorName(basic.Lb))
 		if err != nil {
 			epLog.Warn("unsupported lb strategy, fallback to round-robin", "strategy", basic.Lb, "service", serviceName)

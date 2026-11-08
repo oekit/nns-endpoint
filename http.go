@@ -161,20 +161,20 @@ func (f *HTTPEndpointFactory) MakeEndpoint(serviceName string) (Endpoint, error)
 		result, err := f.breakers.getOrCreate(serviceName).Execute(func() (any, error) {
 			var lastErr error
 			for attempt := 0; attempt <= retry; attempt++ {
-				result, err := f.attemptOnce(ctx, sel, nodes, req, timeout)
-				if err == nil {
-					return result, nil
+				res, attemptErr := f.attemptOnce(ctx, sel, nodes, req, timeout)
+				if attemptErr == nil {
+					return res, nil
 				}
-				if !retryable(err) {
-					return nil, err
+				if !retryable(attemptErr) {
+					return nil, attemptErr
 				}
-				lastErr = err
+				lastErr = attemptErr
 				if attempt < retry {
 					if f.metrics != nil {
 						f.metrics.ObserveRetry(serviceName, httpMetricsKind)
 					}
 					epLog.Debug("http endpoint retry on next instance",
-						"service", serviceName, "attempt", attempt+1, "err", err)
+						"service", serviceName, "attempt", attempt+1, "err", attemptErr)
 				}
 			}
 			return nil, lastErr

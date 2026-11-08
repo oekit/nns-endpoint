@@ -450,9 +450,9 @@ func TestGRPCPool_Acquire_SparesInFlightFromIdleEvict(t *testing.T) {
 	// 在途 RPC 必须正常完成
 	close(release)
 	select {
-	case err := <-invokeErr:
-		if err != nil {
-			t.Fatalf("in-flight RPC killed by idle eviction: %v", err)
+	case callErr := <-invokeErr:
+		if callErr != nil {
+			t.Fatalf("in-flight RPC killed by idle eviction: %v", callErr)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("timeout waiting for in-flight RPC")
@@ -512,16 +512,17 @@ func TestGRPCPool_Acquire_FullPoolEvictSkipsInFlight(t *testing.T) {
 	time.Sleep(400 * time.Millisecond) // A 超过 idleTTL（借出口径），但在途引用持有中
 
 	// 满池创建新地址：驱逐跳过在用的 A → 拒绝创建
-	if _, err := pool.Get(context.Background(), addrB, dialOpts...); err == nil || !containsAny(err.Error(), "max size") {
+	_, err = pool.Get(context.Background(), addrB, dialOpts...)
+	if err == nil || !containsAny(err.Error(), "max size") {
 		t.Fatalf("expected max size reached while in-flight conn occupies pool, got: %v", err)
 	}
 
 	// 在途 RPC 不受驱逐路径影响
 	close(release)
 	select {
-	case err := <-invokeErr:
-		if err != nil {
-			t.Fatalf("in-flight RPC killed by full-pool eviction: %v", err)
+	case callErr := <-invokeErr:
+		if callErr != nil {
+			t.Fatalf("in-flight RPC killed by full-pool eviction: %v", callErr)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("timeout waiting for in-flight RPC")

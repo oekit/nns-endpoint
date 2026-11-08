@@ -8,7 +8,7 @@
 ## 安装
 
 ```bash
-go get github.com/oekit/nns-endpoint@v0.2.14
+go get github.com/oekit/nns-endpoint@v0.2.15
 ```
 
 ## 这个仓库做什么

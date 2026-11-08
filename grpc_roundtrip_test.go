@@ -2,15 +2,18 @@ package endpoint
 
 import (
 	"context"
+	"errors"
 	"net"
 	"sync"
 	"testing"
+	"time"
 
 	nnsclient "github.com/oekit/nns/client"
 	"github.com/oekit/nns/metadata"
 	"github.com/oekit/registry"
 
 	"github.com/oekit/httpx/loadbalance"
+	"github.com/sony/gobreaker"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
@@ -198,6 +201,70 @@ func TestGRPCEndpoint_InvokeFailureReportsDone(t *testing.T) {
 	}
 	if errs[0] == nil {
 		t.Error("expected done callback to receive the Invoke error, got nil")
+	}
+}
+
+// TestGRPCEndpoint_BreakerRejectionSkipsNodeDone 是 #97 的回归测试：
+// 服务级熔断拒绝（ErrOpenState/ErrTooManyRequests）时调用从未到达节点，
+// 不得回写本次 Select 选中的节点的 done——此前熔断打开期间每次调用仍
+// GetInstances→Select→Execute 即刻拒绝→done(Err)，p2c 对被反复选中的
+// 健康节点持续记故障 EWMA（makeDone 对非 nil Err 追加惩罚），真实肇事
+// 节点反而可能 EWMA 最低，熔断恢复后流量分布被反向扭曲。
+func TestGRPCEndpoint_BreakerRejectionSkipsNodeDone(t *testing.T) {
+	dialOpts := newBufconnGRPCServer(t, "nns.test.EchoService", map[string]func(ctx context.Context, req *wrapperspb.StringValue) (*wrapperspb.StringValue, error){
+		"Boom": func(_ context.Context, _ *wrapperspb.StringValue) (*wrapperspb.StringValue, error) {
+			return nil, status.Error(codes.Internal, "boom")
+		},
+	})
+
+	rec := &recordingSelector{}
+	factory := newGRPCFactoryWithBufconn(t, dialOpts,
+		WithSelector(rec),
+		// 单次真实失败即 trip，且测试窗口内保持 open
+		WithBreakerSettings(gobreaker.Settings{
+			ReadyToTrip: func(counts gobreaker.Counts) bool { return counts.ConsecutiveFailures >= 1 },
+			Timeout:     time.Minute,
+		}),
+	)
+	defer factory.Close()
+
+	ep, err := factory.MakeEndpoint("svc-a", dialOpts...)
+	if err != nil {
+		t.Fatalf("MakeEndpoint: %v", err)
+	}
+	call := func() error {
+		_, err := ep(context.Background(), GRPCRequest{
+			GrpcServiceName: "nns.test.EchoService",
+			Method:          "Boom",
+			Request:         wrapperspb.String("x"),
+			Reply:           &wrapperspb.StringValue{},
+		})
+		return err
+	}
+
+	// call 1：真实到达节点的 Invoke 失败——done 必须带错误回写（#74 语义）
+	if err := call(); err == nil {
+		t.Fatal("expected first call to fail with Invoke error")
+	}
+	errs := rec.doneErrs()
+	if len(errs) != 1 || errs[0] == nil {
+		t.Fatalf("expected exactly 1 real-failure done sample, got %v", errs)
+	}
+
+	// call 2：熔断已打开——调用从未到达节点，done 不得再回写
+	if err := call(); !errors.Is(err, ErrCircuitOpen) {
+		t.Fatalf("expected ErrCircuitOpen after trip, got: %v", err)
+	}
+	if errs := rec.doneErrs(); len(errs) != 1 {
+		t.Fatalf("breaker rejection must not charge the selected node: got %d done samples, want 1", len(errs))
+	}
+
+	// call 3：熔断持续打开，同样不回写
+	if err := call(); !errors.Is(err, ErrCircuitOpen) {
+		t.Fatalf("expected ErrCircuitOpen while breaker stays open, got: %v", err)
+	}
+	if errs := rec.doneErrs(); len(errs) != 1 {
+		t.Fatalf("repeated breaker rejections must not charge nodes: got %d done samples, want 1", len(errs))
 	}
 }
 

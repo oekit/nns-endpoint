@@ -2,13 +2,46 @@ package endpoint
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"sync/atomic"
 	"testing"
 
 	"github.com/oekit/httpx"
+	"github.com/oekit/httpx/loadbalance"
 	nnsclient "github.com/oekit/nns/client"
 	"github.com/oekit/nns/metadata"
 	"github.com/oekit/registry"
 )
+
+// flakyConfigStore 是 registry.ConfigStore 的测试 fake：可配置「前 N 次
+// GetConfig 失败」模拟配置中心瞬时抖动，之后返回固定内容（#98）。
+type flakyConfigStore struct {
+	failFirst int32
+	calls     int32
+	content   string
+}
+
+func (f *flakyConfigStore) GetConfig(_ context.Context, _, _ string) (string, error) {
+	if atomic.AddInt32(&f.calls, 1) <= atomic.LoadInt32(&f.failFirst) {
+		return "", errors.New("config center transient outage")
+	}
+	return f.content, nil
+}
+
+func (f *flakyConfigStore) ListenConfig(context.Context, string, string, func(string)) error {
+	return nil
+}
+
+func (f *flakyConfigStore) StopListenConfig(context.Context, string, string) error {
+	return nil
+}
+
+// selectorKind 用类型名区分 selector 策略（loadbalance 的具体 selector 类型
+// 未导出，行为断言对 p2c 的随机性难以 deterministic，此处比较具体类型）。
+func selectorKind(sel loadbalance.Selector) string {
+	return fmt.Sprintf("%T", sel)
+}
 
 // newTestServiceClient 创建一个用于测试的 mock 模式 ServiceClient 实例。
 // 每次 New 返回独立实例（不再使用 sync.Once 单例）。
@@ -178,5 +211,98 @@ func TestHTTPEndpointFactory_UnsupportedLBFallback(t *testing.T) {
 		if n == nil || n.Address() == "" {
 			t.Fatalf("Select returned empty node: %v", n)
 		}
+	}
+}
+
+// TestSelectorCache_TransientConfigFailureNotCached 是 #98 的回归测试：
+// selector 首建遇瞬时配置拉取失败必须显式报错且**不写缓存**——此前
+// ServiceWithName 软降级静默取默认值，产出的 roundrobin selector 进缓存后
+// 无 TTL、无失败重试标记，只有配置变更事件或 ResetSelector 会重建：服务
+// 治理配置 lb=p2c 时，上线首调恰逢 Nacos 抖动，p2c 在热更前永不生效。
+// 修复后改用 ServiceConfig（真实错误面）：失败不进缓存，配置恢复后下次
+// 调用重试首建，配置的策略立即生效。
+func TestSelectorCache_TransientConfigFailureNotCached(t *testing.T) {
+	store := &flakyConfigStore{failFirst: 1, content: `{"lb":"p2c"}`}
+	c := nnsclient.New(nnsclient.WithConfigStore(store))
+	factory := NewHTTPEndpointFactory(c)
+	defer factory.Close()
+
+	// 第一次：配置中心瞬时抖动 → 显式报错（不再静默降级默认值）
+	if _, err := factory.selectorCache.getOrCreate(context.Background(), "svc-a"); err == nil {
+		t.Fatal("expected transient config fetch failure to surface, got nil")
+	}
+
+	// 失败产出不得进缓存：否则 roundrobin 被永久钉死
+	factory.selectorCache.mu.RLock()
+	_, cached := factory.selectorCache.selectors["svc-a"]
+	factory.selectorCache.mu.RUnlock()
+	if cached {
+		t.Fatal("failed first-build must not poison the selector cache")
+	}
+
+	// 配置恢复后：下次调用重试首建，配置的 p2c 立即生效
+	sel, err := factory.selectorCache.getOrCreate(context.Background(), "svc-a")
+	if err != nil {
+		t.Fatalf("getOrCreate after config recovery: %v", err)
+	}
+	wantP2C, err := loadbalance.NewSelector(loadbalance.StrategyP2C)
+	if err != nil {
+		t.Fatalf("NewSelector(p2c): %v", err)
+	}
+	if got := selectorKind(sel); got != selectorKind(wantP2C) {
+		t.Fatalf("expected p2c selector after config recovery, got %s", got)
+	}
+}
+
+// TestSelectorCache_UnknownLbStableFallback 钉住 #98 修复的另一半边界：
+// 「配置真实存在但策略名写错」是确定性决策（重试也不会变），仍允许稳定
+// 回退 roundrobin 并写缓存——不该让每次调用都重试拉配置。
+func TestSelectorCache_UnknownLbStableFallback(t *testing.T) {
+	store := &flakyConfigStore{content: `{"lb":"no-such-strategy"}`}
+	c := nnsclient.New(nnsclient.WithConfigStore(store))
+	factory := NewHTTPEndpointFactory(c)
+	defer factory.Close()
+
+	sel, err := factory.selectorCache.getOrCreate(context.Background(), "svc-a")
+	if err != nil {
+		t.Fatalf("getOrCreate: %v", err)
+	}
+	wantRR, err := loadbalance.NewSelector(loadbalance.StrategyRoundRobin)
+	if err != nil {
+		t.Fatalf("NewSelector(roundrobin): %v", err)
+	}
+	if got := selectorKind(sel); got != selectorKind(wantRR) {
+		t.Fatalf("expected roundrobin fallback for unknown strategy, got %s", got)
+	}
+
+	// 稳定回退：缓存命中，后续调用复用同一 selector
+	sel2, err := factory.selectorCache.getOrCreate(context.Background(), "svc-a")
+	if err != nil {
+		t.Fatalf("getOrCreate second: %v", err)
+	}
+	if sel != sel2 {
+		t.Fatal("expected fallback selector to be cached")
+	}
+}
+
+// TestSelectorCache_NoConfigStoreFallbackDefaults 钉住兼容边界：未接入配置
+// 中心的部署（非 mock 且未注入 ConfigStore），ServiceConfig 返回
+// ErrConfigStoreUnavailable——这不是可重试的瞬时故障（重试也不会有配置），
+// 保持旧行为：按默认值 roundrobin 稳定回退并写缓存。
+func TestSelectorCache_NoConfigStoreFallbackDefaults(t *testing.T) {
+	c := nnsclient.New() // 非 mock、无任何 provider：降级态
+	factory := NewHTTPEndpointFactory(c)
+	defer factory.Close()
+
+	sel, err := factory.selectorCache.getOrCreate(context.Background(), "svc-a")
+	if err != nil {
+		t.Fatalf("getOrCreate without config store: %v", err)
+	}
+	wantRR, err := loadbalance.NewSelector(loadbalance.StrategyRoundRobin)
+	if err != nil {
+		t.Fatalf("NewSelector(roundrobin): %v", err)
+	}
+	if got := selectorKind(sel); got != selectorKind(wantRR) {
+		t.Fatalf("expected default roundrobin selector, got %s", got)
 	}
 }

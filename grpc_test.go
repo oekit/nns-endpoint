@@ -9,6 +9,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/connectivity"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/protobuf/types/known/wrapperspb"
 )
 
 // TestGRPCPool_Get_CachesConnection verifies that two Get calls for the
@@ -256,6 +257,7 @@ func newTestClientConn(t *testing.T, addr string) *grpc.ClientConn {
 // TestGRPCPool_Touch_IdentityCheck 验证 touch 的写锁内身份校验（Get 防止
 // 返回已被并发驱逐/关闭连接的核心逻辑）：
 //   - entry 是现役条目 → 返回同一连接并刷新 lastUsed；
+//   - ref=true 时在途引用加一；
 //   - entry 已被替换 → (nil, false)，调用方必须重试；
 //   - entry 已被删除 → (nil, false)。
 //
@@ -271,9 +273,9 @@ func TestGRPCPool_Touch_IdentityCheck(t *testing.T) {
 	pool.conns[addr] = entry
 	pool.mu.Unlock()
 
-	// 1) 现役条目：返回同一连接并刷新 lastUsed
+	// 1) 现役条目：返回同一连接并刷新 lastUsed（无引用借出，inFlight 不变）
 	before := entry.lastUsed
-	conn, ok := pool.touch(addr, entry)
+	conn, ok := pool.touch(addr, entry, false)
 	if !ok {
 		t.Fatal("touch: expected ok=true for live entry")
 	}
@@ -282,25 +284,40 @@ func TestGRPCPool_Touch_IdentityCheck(t *testing.T) {
 	}
 	pool.mu.RLock()
 	refreshed := pool.conns[addr].lastUsed
+	inFlight := pool.conns[addr].inFlight
 	pool.mu.RUnlock()
 	if !refreshed.After(before) {
 		t.Error("touch: expected lastUsed to be refreshed")
 	}
+	if inFlight != 0 {
+		t.Errorf("touch(ref=false): expected inFlight unchanged, got %d", inFlight)
+	}
 
-	// 2) entry 已被替换：返回 (nil, false)
+	// 2) ref=true：在途引用加一（Acquire 借出口径）
+	if _, ok := pool.touch(addr, entry, true); !ok {
+		t.Fatal("touch(ref=true): expected ok=true for live entry")
+	}
+	pool.mu.RLock()
+	inFlight = pool.conns[addr].inFlight
+	pool.mu.RUnlock()
+	if inFlight != 1 {
+		t.Errorf("touch(ref=true): expected inFlight=1, got %d", inFlight)
+	}
+
+	// 3) entry 已被替换：返回 (nil, false)
 	replacement := &connEntry{conn: newTestClientConn(t, "127.0.0.1:2"), lastUsed: time.Now()}
 	pool.mu.Lock()
 	pool.conns[addr] = replacement
 	pool.mu.Unlock()
-	if c, ok := pool.touch(addr, entry); ok || c != nil {
+	if c, ok := pool.touch(addr, entry, false); ok || c != nil {
 		t.Fatalf("touch: expected (nil, false) for replaced entry, got (%v, %v)", c, ok)
 	}
 
-	// 3) entry 已被删除：返回 (nil, false)
+	// 4) entry 已被删除：返回 (nil, false)
 	pool.mu.Lock()
 	delete(pool.conns, addr)
 	pool.mu.Unlock()
-	if c, ok := pool.touch(addr, replacement); ok || c != nil {
+	if c, ok := pool.touch(addr, replacement, false); ok || c != nil {
 		t.Fatalf("touch: expected (nil, false) for deleted entry, got (%v, %v)", c, ok)
 	}
 }
@@ -370,17 +387,269 @@ func withTestInsecureCreds() grpc.DialOption {
 	return grpc.WithTransportCredentials(insecure.NewCredentials())
 }
 
+// inFlightOf 读取指定地址条目的在途引用计数（条目不存在返回 -1）。
+// 仅供测试观察池内部记账。
+func inFlightOf(p *GRPCPool, addr string) int {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	e, ok := p.conns[addr]
+	if !ok {
+		return -1
+	}
+	return e.inFlight
+}
+
+// TestGRPCPool_Acquire_SparesInFlightFromIdleEvict 是 #99 的回归测试（忠实
+// 复刻 issue 复现件）：长生命周期调用（此处以阻塞一元调用模拟流式占用）
+// 跨越空闲驱逐时刻——借出口径下条目早已「空闲超龄」，修复前第二次 Get
+// 触发同地址驱逐、Close 掉在途连接（在途 RPC 立即报 Unavailable）；修复后
+// 在途引用保护连接，RPC 正常完成。
+func TestGRPCPool_Acquire_SparesInFlightFromIdleEvict(t *testing.T) {
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	dialOpts := newBufconnGRPCServer(t, "nns.test.EchoService", map[string]func(ctx context.Context, req *wrapperspb.StringValue) (*wrapperspb.StringValue, error){
+		"Slow": func(_ context.Context, req *wrapperspb.StringValue) (*wrapperspb.StringValue, error) {
+			close(entered)
+			<-release
+			return wrapperspb.String("done:" + req.GetValue()), nil
+		},
+	})
+
+	pool := NewGRPCPool()
+	pool.idleTTL = 250 * time.Millisecond
+	defer pool.Close()
+
+	const addr = "127.0.0.1:1"
+	conn, err := pool.Acquire(context.Background(), addr, dialOpts...)
+	if err != nil {
+		t.Fatalf("Acquire: %v", err)
+	}
+	if got := inFlightOf(pool, addr); got != 1 {
+		t.Fatalf("expected inFlight=1 after Acquire, got %d", got)
+	}
+
+	invokeErr := make(chan error, 1)
+	go func() {
+		reply := &wrapperspb.StringValue{}
+		invokeErr <- conn.Invoke(context.Background(), "/nns.test.EchoService/Slow", wrapperspb.String("x"), reply)
+	}()
+	<-entered // RPC 已到达服务端、正占用连接
+
+	// 超过 idleTTL：借出口径（lastUsed=借出时刻）下条目已「空闲超龄」
+	time.Sleep(400 * time.Millisecond)
+
+	// 同地址 Get 触发空闲驱逐路径：修复前这里 Close 掉在途连接
+	reused, err := pool.Get(context.Background(), addr, dialOpts...)
+	if err != nil {
+		t.Fatalf("Get during in-flight RPC: %v", err)
+	}
+	if reused != conn {
+		t.Fatal("expected the in-flight conn to be reused, not evicted and recreated")
+	}
+
+	// 在途 RPC 必须正常完成
+	close(release)
+	select {
+	case callErr := <-invokeErr:
+		if callErr != nil {
+			t.Fatalf("in-flight RPC killed by idle eviction: %v", callErr)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for in-flight RPC")
+	}
+
+	// 归还并过期后：驱逐恢复（inFlight==0 判据解除）
+	pool.Release(addr, conn)
+	if got := inFlightOf(pool, addr); got != 0 {
+		t.Fatalf("expected inFlight=0 after Release, got %d", got)
+	}
+	pool.mu.Lock()
+	pool.conns[addr].lastUsed = time.Now().Add(-time.Hour)
+	pool.mu.Unlock()
+	fresh, err := pool.Get(context.Background(), addr, dialOpts...)
+	if err != nil {
+		t.Fatalf("Get after release+expiry: %v", err)
+	}
+	if fresh == conn {
+		t.Fatal("expected expired conn to be evicted and recreated after Release")
+	}
+}
+
+// TestGRPCPool_Acquire_FullPoolEvictSkipsInFlight 覆盖满池驱逐路径的 #99
+// 语义：evictIdleLocked 必须跳过有在途引用的条目——满池时宁可拒绝创建
+// （#72/#76 的既有拒绝语义），也不 Close 在途连接。
+func TestGRPCPool_Acquire_FullPoolEvictSkipsInFlight(t *testing.T) {
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	dialOpts := newBufconnGRPCServer(t, "nns.test.EchoService", map[string]func(ctx context.Context, req *wrapperspb.StringValue) (*wrapperspb.StringValue, error){
+		"Slow": func(_ context.Context, req *wrapperspb.StringValue) (*wrapperspb.StringValue, error) {
+			close(entered)
+			<-release
+			return wrapperspb.String("done:" + req.GetValue()), nil
+		},
+	})
+
+	pool := NewGRPCPoolWithSize(1)
+	pool.idleTTL = 250 * time.Millisecond
+	defer pool.Close()
+
+	const (
+		addrA = "10.9.0.1:1"
+		addrB = "10.9.0.2:2"
+	)
+
+	connA, err := pool.Acquire(context.Background(), addrA, dialOpts...)
+	if err != nil {
+		t.Fatalf("Acquire: %v", err)
+	}
+
+	invokeErr := make(chan error, 1)
+	go func() {
+		reply := &wrapperspb.StringValue{}
+		invokeErr <- connA.Invoke(context.Background(), "/nns.test.EchoService/Slow", wrapperspb.String("a"), reply)
+	}()
+	<-entered
+	time.Sleep(400 * time.Millisecond) // A 超过 idleTTL（借出口径），但在途引用持有中
+
+	// 满池创建新地址：驱逐跳过在用的 A → 拒绝创建
+	_, err = pool.Get(context.Background(), addrB, dialOpts...)
+	if err == nil || !containsAny(err.Error(), "max size") {
+		t.Fatalf("expected max size reached while in-flight conn occupies pool, got: %v", err)
+	}
+
+	// 在途 RPC 不受驱逐路径影响
+	close(release)
+	select {
+	case callErr := <-invokeErr:
+		if callErr != nil {
+			t.Fatalf("in-flight RPC killed by full-pool eviction: %v", callErr)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for in-flight RPC")
+	}
+
+	// 归还并过期后：A 正常让位，B 创建成功
+	pool.Release(addrA, connA)
+	pool.mu.Lock()
+	pool.conns[addrA].lastUsed = time.Now().Add(-time.Hour)
+	pool.mu.Unlock()
+
+	connB, err := pool.Get(context.Background(), addrB, dialOpts...)
+	if err != nil {
+		t.Fatalf("Get new addr after release+expiry: %v", err)
+	}
+	if connB == nil {
+		t.Fatal("Get new addr returned nil conn")
+	}
+	if state := connA.GetState(); state != connectivity.Shutdown {
+		t.Errorf("expected released+expired conn evicted (Shutdown), got %v", state)
+	}
+}
+
+// TestGRPCPool_Acquire_ReusesCachedConnection 验证 Acquire 与 Get 共享同一
+// 连接缓存，且在途引用随配对 Acquire/Release 增减、Get（无引用借出）不动账。
+func TestGRPCPool_Acquire_ReusesCachedConnection(t *testing.T) {
+	pool := NewGRPCPool()
+	defer pool.Close()
+
+	const addr = "10.9.2.1:1"
+	conn1, err := pool.Acquire(context.Background(), addr, withTestInsecureCreds())
+	if err != nil {
+		t.Fatalf("Acquire first: %v", err)
+	}
+	conn2, err := pool.Acquire(context.Background(), addr, withTestInsecureCreds())
+	if err != nil {
+		t.Fatalf("Acquire second: %v", err)
+	}
+	if conn1 != conn2 {
+		t.Fatal("expected Acquire to reuse the cached conn")
+	}
+	if got := inFlightOf(pool, addr); got != 2 {
+		t.Fatalf("expected inFlight=2 after two Acquires, got %d", got)
+	}
+
+	// Get 是无引用借出：不改在途引用
+	if _, err := pool.Get(context.Background(), addr, withTestInsecureCreds()); err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got := inFlightOf(pool, addr); got != 2 {
+		t.Fatalf("expected Get to leave inFlight unchanged, got %d", got)
+	}
+
+	pool.Release(addr, conn1)
+	pool.Release(addr, conn2)
+	if got := inFlightOf(pool, addr); got != 0 {
+		t.Fatalf("expected inFlight=0 after paired Releases, got %d", got)
+	}
+}
+
+// TestGRPCPool_Release_IdentityCheck 验证 Release 的配对语义（#99）：
+//   - 归还与借出不配对（连接已被替换/驱逐）→ no-op；
+//   - 配对归还 → 引用减一、lastUsed 刷新（空闲计时从归还时刻起算）；
+//   - 归还后过期 → 连接重新参与空闲驱逐。
+func TestGRPCPool_Release_IdentityCheck(t *testing.T) {
+	pool := NewGRPCPool()
+	defer pool.Close()
+
+	const addr = "10.9.1.1:1"
+	conn, err := pool.Acquire(context.Background(), addr, withTestInsecureCreds())
+	if err != nil {
+		t.Fatalf("Acquire: %v", err)
+	}
+
+	// 1) 不配对的归还：no-op，在途引用不变
+	stranger := newTestClientConn(t, "127.0.0.1:9")
+	defer stranger.Close()
+	pool.Release(addr, stranger)
+	if got := inFlightOf(pool, addr); got != 1 {
+		t.Fatalf("Release with foreign conn must be a no-op, inFlight=%d", got)
+	}
+
+	// 2) 配对归还：引用减一，lastUsed 刷新
+	pool.mu.Lock()
+	pool.conns[addr].lastUsed = time.Now().Add(-time.Hour)
+	pool.mu.Unlock()
+	pool.Release(addr, conn)
+	if got := inFlightOf(pool, addr); got != 0 {
+		t.Fatalf("expected inFlight=0 after paired Release, got %d", got)
+	}
+	pool.mu.RLock()
+	age := time.Since(pool.conns[addr].lastUsed)
+	pool.mu.RUnlock()
+	if age > time.Minute {
+		t.Fatalf("expected lastUsed refreshed on Release, age=%v", age)
+	}
+
+	// 3) 归还后过期：重新可驱逐
+	pool.mu.Lock()
+	pool.conns[addr].lastUsed = time.Now().Add(-time.Hour)
+	pool.mu.Unlock()
+	fresh, err := pool.Get(context.Background(), addr, withTestInsecureCreds())
+	if err != nil {
+		t.Fatalf("Get after release+expiry: %v", err)
+	}
+	if fresh == conn {
+		t.Fatal("expected expired conn to be evicted and recreated after Release")
+	}
+	if state := conn.GetState(); state != connectivity.Shutdown {
+		t.Errorf("expected old conn Shutdown after eviction, got %v", state)
+	}
+}
+
 // TestGRPCPool_Create_FullPoolRejectsWhenNoIdle 覆盖满池拒绝路径的边界：
 // 池满且没有空闲超龄条目可驱逐时，仍直接拒绝（max size reached）。
 func TestGRPCPool_Create_FullPoolRejectsWhenNoIdle(t *testing.T) {
 	pool := NewGRPCPoolWithSize(1)
 	defer pool.Close()
 
-	if _, err := pool.Get(context.Background(), "10.0.0.1:1", withTestInsecureCreds()); err != nil {
+	conn1, err := pool.Get(context.Background(), "10.0.0.1:1", withTestInsecureCreds())
+	if err != nil {
 		t.Fatalf("Get first: %v", err)
 	}
+	// 归还借出引用（#99）：让驱逐判据只看 lastUsed 新鲜度
+	pool.Release("10.0.0.1:1", conn1)
 
-	_, err := pool.Get(context.Background(), "10.0.0.2:2", withTestInsecureCreds())
+	_, err = pool.Get(context.Background(), "10.0.0.2:2", withTestInsecureCreds())
 	if err == nil || !containsAny(err.Error(), "max size") {
 		t.Fatalf("expected max size reached (fresh pool, nothing idle), got: %v", err)
 	}
@@ -402,6 +671,8 @@ func TestGRPCPool_Create_FullPoolEvictsIdleOtherAddr(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get old addr: %v", err)
 	}
+	// 归还借出引用（#99）：让旧地址条目重新回到「可按空闲判据驱逐」状态
+	pool.Release(addrA, connA)
 
 	// A 仍在活跃窗口内：无可驱逐条目，新地址被拒（拒绝语义保持）
 	if _, err = pool.Get(context.Background(), addrB, withTestInsecureCreds()); err == nil || !containsAny(err.Error(), "max size") {

@@ -14,6 +14,7 @@ import (
 	nnsclient "github.com/oekit/nns/client"
 	"github.com/oekit/nns/metadata"
 	"github.com/oekit/registry"
+	"github.com/sony/gobreaker"
 )
 
 // newHTTPFactoryWithTestServer starts an httptest server and builds a
@@ -284,8 +285,7 @@ func TestHTTPEndpoint_MakeEndpoint_InvalidRequestType(t *testing.T) {
 
 // TestHTTPEndpoint_MakeEndpoint_NoInstances covers the zero-instances path.
 // The endpoint must return registry.ErrNoInstances (not a generic error).
-func TestHTTPEndpoint_MakeEndpoint_NoInstances(t *testing.T) {
-	// Build a factory with NO instances for svc-empty.
+func TestHTTPEndpoint_MakeEndpoint_NoInstances(t *testing.T) { // Build a factory with NO instances for svc-empty.
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
 	t.Cleanup(srv.Close)
 
@@ -331,6 +331,65 @@ func TestHTTPEndpoint_MakeEndpoint_UnknownService(t *testing.T) {
 	_, err = ep(context.Background(), HTTPRequest{Method: http.MethodGet, Path: "/x"})
 	if !errors.Is(err, registry.ErrNoInstances) {
 		t.Errorf("expected registry.ErrNoInstances, got: %v", err)
+	}
+}
+
+// TestHTTPEndpoint_NoInstancesDoesNotTripBreaker 是 #96 的回归测试：
+// 服务缩容到 0（或注册中心短暂返回空）时，GetInstances 的 ErrNoInstances
+// 不计入熔断连续失败——此前它在 Execute 内部的 attemptOnce 产生，无
+// statusError ⇒ 按网络错误计失败且换实例重试：默认 ReadyToTrip
+// （ConsecutiveFailures > 5）下第 7 次调用起被 ErrCircuitOpen 掩盖，调用方
+// 无法区分「无后端」与「熔断打开」，服务恢复出实例后最长 30s（breaker
+// Timeout）内仍被拒。修复后发现层在熔断 Execute 之外（与 gRPC 路径对齐）：
+// 错误形态始终是 ErrNoInstances，实例恢复后立即正常服务。
+func TestHTTPEndpoint_NoInstancesDoesNotTripBreaker(t *testing.T) {
+	var hits atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, `{"ok":true}`)
+	}))
+	t.Cleanup(srv.Close)
+	host, port := parseHostPort(srv.URL)
+
+	c := nnsclient.New(
+		nnsclient.WithMockMode(true),
+		nnsclient.WithStaticInstances("svc-a", []registry.Instance{{IP: host, Port: port}}),
+	)
+	factory := NewHTTPEndpointFactory(c)
+	defer factory.Close()
+
+	ep, err := factory.MakeEndpoint("svc-a")
+	if err != nil {
+		t.Fatalf("MakeEndpoint: %v", err)
+	}
+
+	// 缩容到 0：连续调用次数远超默认 ReadyToTrip 阈值（连续失败 > 5），
+	// 每次都必须保持 ErrNoInstances 错误形态
+	c.SetStaticInstances("svc-a", nil)
+	for i := 0; i < 10; i++ {
+		_, callErr := ep(context.Background(), HTTPRequest{Method: http.MethodGet, Path: "/x"})
+		if !errors.Is(callErr, registry.ErrNoInstances) {
+			t.Fatalf("call %d: expected ErrNoInstances, got: %v", i+1, callErr)
+		}
+	}
+
+	// 熔断器必须仍是 closed：发现层错误不构成熔断样本
+	if state := factory.breakers.getOrCreate("svc-a").State(); state != gobreaker.StateClosed {
+		t.Fatalf("expected breaker closed after 10 no-instance calls, got %v", state)
+	}
+
+	// 恢复出实例：下一次调用立即正常服务，不被 ErrCircuitOpen 拒绝
+	c.SetStaticInstances("svc-a", []registry.Instance{{IP: host, Port: port}})
+	var got map[string]any
+	if _, err := ep(context.Background(), HTTPRequest{Method: http.MethodGet, Path: "/x", Result: &got}); err != nil {
+		t.Fatalf("expected success right after instances recovered, got: %v", err)
+	}
+	if got["ok"] != true {
+		t.Errorf("expected ok=true, got %v", got)
+	}
+	if hits.Load() != 1 {
+		t.Errorf("expected exactly 1 backend hit after recovery, got %d", hits.Load())
 	}
 }
 

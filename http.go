@@ -114,6 +114,10 @@ func (f *HTTPEndpointFactory) ResetSelector(serviceName string) {
 // WithRetryConfig 的层次结构一致），避免单次调用的多次尝试
 // 撑爆连续失败计数。每次尝试独立 per-attempt 超时，最坏总耗时
 // 为 (1+Retry) × ReadTimeout。
+//
+// 分层边界（#96/#98）：实例发现与 selector 首建在 Execute 之外——
+// 「无实例」与「配置中心故障」都不是目标后端的故障，不构成熔断样本
+// （与 gRPC 路径的分层一致）。
 func (f *HTTPEndpointFactory) MakeEndpoint(serviceName string) (Endpoint, error) {
 	return func(ctx context.Context, request any) (any, error) {
 		req, ok := request.(HTTPRequest)
@@ -130,10 +134,34 @@ func (f *HTTPEndpointFactory) MakeEndpoint(serviceName string) (Endpoint, error)
 		// WithTimeout(ctx, 0) 的立即 DeadlineExceeded
 		timeout := resolveCallTimeout(serviceName, req.Timeout, basic.ReadTimeout)
 
+		// #96：实例发现与 selector 首建在熔断 Execute 之外执行——熔断样本
+		// 只反映「对被选节点的真实调用」。此前 ErrNoInstances（服务缩容到 0
+		// 或注册中心短暂返回空）产生于 Execute 内部的 attemptOnce，无
+		// statusError ⇒ 按网络错误计入熔断连续失败：第 7 次调用起被
+		// ErrCircuitOpen 掩盖，调用方无法区分「无后端」与「熔断打开」，服务
+		// 恢复出实例后最长 30s（breaker Timeout）内仍被拒。与 gRPC 路径
+		// （发现/选点在熔断外，grpc.go）对齐。
+		instances, err := f.client.GetInstances(ctx, serviceName)
+		if err != nil {
+			return nil, fmt.Errorf("get instances: %w", err)
+		}
+		if len(instances) == 0 {
+			return nil, registry.ErrNoInstances
+		}
+
+		// #98：selector 首建遇配置拉取失败会显式报错（不写缓存、下次调用
+		// 重试）——配置中心故障不属于目标服务的故障，同样不构成熔断样本，
+		// 放在 Execute 之外。
+		sel, err := f.selectorCache.getOrCreate(ctx, serviceName)
+		if err != nil {
+			return nil, err
+		}
+		nodes := httpx.SelectorNodes(instances)
+
 		result, err := f.breakers.getOrCreate(serviceName).Execute(func() (any, error) {
 			var lastErr error
 			for attempt := 0; attempt <= retry; attempt++ {
-				result, err := f.attemptOnce(ctx, serviceName, req, timeout)
+				result, err := f.attemptOnce(ctx, sel, nodes, req, timeout)
 				if err == nil {
 					return result, nil
 				}
@@ -167,23 +195,11 @@ func (f *HTTPEndpointFactory) MakeEndpoint(serviceName string) (Endpoint, error)
 }
 
 // attemptOnce 执行一次"选实例 + 发请求"尝试。
-// 每次尝试重新获取实例列表并 Pick——重试落在不同节点上才有意义
-// （RoundRobin 自然前进，Random 可能撞同一节点）。
-func (f *HTTPEndpointFactory) attemptOnce(ctx context.Context, serviceName string, req HTTPRequest, timeout time.Duration) (any, error) {
-	instances, err := f.client.GetInstances(ctx, serviceName)
-	if err != nil {
-		return nil, fmt.Errorf("get instances: %w", err)
-	}
-
-	if len(instances) == 0 {
-		return nil, registry.ErrNoInstances
-	}
-
-	sel, err := f.selectorCache.getOrCreate(ctx, serviceName)
-	if err != nil {
-		return nil, err
-	}
-	n, done, err := sel.Select(ctx, httpx.SelectorNodes(instances))
+// 实例列表与 selector 由调用方在熔断外一次性获取（#96/#98）；每次尝试
+// 重新 Pick——selector 状态自然前进（RoundRobin 游标、p2c EWMA 随 done
+// 回写演化），重试落在不同节点上才有意义（Random 可能撞同一节点）。
+func (f *HTTPEndpointFactory) attemptOnce(ctx context.Context, sel loadbalance.Selector, nodes []loadbalance.Node, req HTTPRequest, timeout time.Duration) (any, error) {
+	n, done, err := sel.Select(ctx, nodes)
 	if err != nil {
 		return nil, err
 	}

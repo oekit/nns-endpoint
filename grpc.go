@@ -133,11 +133,15 @@ func (f *GRPCEndpointFactory) MakeEndpoint(serviceName string, opts ...grpc.Dial
 			return nil, err
 		}
 
-		conn, err := f.pool.Get(ctx, n.Address(), opts...)
+		conn, err := f.pool.Acquire(ctx, n.Address(), opts...)
 		if err != nil {
 			done(ctx, loadbalance.DoneInfo{Err: err})
 			return nil, fmt.Errorf("get grpc conn: %w", err)
 		}
+		// #99：借出记在途引用，调用结束归还——空闲驱逐不会关闭有在途
+		// 引用的连接。直接使用池的长生命周期流式调用方同样经
+		// Acquire/Release 获得驱逐保护。
+		defer f.pool.Release(n.Address(), conn)
 
 		// #75：两级超时均缺配（0）时兜底 defaultCallTimeout，而非
 		// WithTimeout(ctx, 0) 的立即 DeadlineExceeded

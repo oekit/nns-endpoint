@@ -2,6 +2,15 @@
 
 由 ekit v0.34.0（git.enjoye.top/enjoydream/ekit，冻结维护）拆分而来。所有 notable 变更记录如下。
 
+## [v0.3.0] — 2026-11-09
+
+- fix(http): 无实例/配置故障不计熔断样本（#96）
+- fix(grpc): 熔断拒绝不回写节点 done——p2c EWMA 不被污染（#97）
+- fix(balancer): selector 首建瞬时失败不钉死 roundrobin（#98）
+- fix(pool): 空闲驱逐复核在途引用——活跃流式连接不被 Close（#99）
+
+关联问题单：nns-endpoint#96、nns-endpoint#97、nns-endpoint#98、nns-endpoint#99。
+
 ## [v0.2.15] — 2026-11-08
 
 - build: 依赖地板对齐——本版把 oekit 依赖地板抬到各依赖当前最新已发布版本（matrix-tools/scripts/align_floors.py 维护轮）

@@ -64,7 +64,7 @@ require (
 	github.com/oekit/concurrency v0.31.2 // indirect
 	github.com/oekit/core v0.13.6 // indirect
 	github.com/oekit/pkg v0.41.1 // indirect
-	github.com/oekit/registry/nacosimpl v0.1.12 // indirect
+	github.com/oekit/registry/nacosimpl v0.1.13 // indirect
 	github.com/orcaman/concurrent-map v0.0.0-20210501183033-44dafcb38ecc // indirect
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/prometheus/client_model v0.6.3 // indirect

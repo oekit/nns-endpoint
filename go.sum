@@ -179,8 +179,8 @@ github.com/oekit/registry v0.5.12 h1:0xuPhiRqiBelE7o6UcJH3hyo+tiKQgPdjQpHrs73oiU
 github.com/oekit/registry v0.5.12/go.mod h1:EF7qwU3ZksKO6JBRbHbOH/olrz//vJ3w3dQZtxkYP30=
 github.com/oekit/registry/nacos v0.1.12 h1:lZG0aMTQ3vX88h1x20KYImmfPgmLWcC8LKTuFh9z/2w=
 github.com/oekit/registry/nacos v0.1.12/go.mod h1:Y7ss6cUUpZ2RWU/XXnZAGOz0KMO52veuFrDXSw7h6e8=
-github.com/oekit/registry/nacosimpl v0.1.12 h1:OEXsoGMAfc6D3vPmn88kJwizTMCjnr7CN8jAv1SIZHE=
-github.com/oekit/registry/nacosimpl v0.1.12/go.mod h1:aU3g5WDJdqOWCc4EJrNXz+OqEZjtXDyvteNN3BLcjeg=
+github.com/oekit/registry/nacosimpl v0.1.13 h1:ROoxIYLlQmxAyus+LNeEjk09ljZ/k0RLlqfZQl/VxiI=
+github.com/oekit/registry/nacosimpl v0.1.13/go.mod h1:KE6FlNwUee48t8wbPoXgG3kxtWn7iEyhrZCfTohGjK4=
 github.com/oekit/tracing v0.3.10 h1:99GPF0cp59bKUn7rwQDfSDJhyEc8CHCEHJhgU9LXr2Y=
 github.com/oekit/tracing v0.3.10/go.mod h1:Eri02H392oekPWXLJWsWQ69WV7Sea/rMhbMxa6Qg0dE=
 github.com/orcaman/concurrent-map v0.0.0-20210501183033-44dafcb38ecc h1:Ak86L+yDSOzKFa7WM5bf5itSOo1e3Xh8bm5YCMUXIjQ=

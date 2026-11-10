@@ -5,8 +5,8 @@ go 1.26.0
 require (
 	github.com/cloudwego/hertz v0.10.6
 	github.com/oekit/httpx v0.9.0
-	github.com/oekit/logx v0.9.0
-	github.com/oekit/metrics v0.2.1
+	github.com/oekit/logx v0.9.1
+	github.com/oekit/metrics v0.2.2
 	github.com/oekit/nns v0.5.14
 	github.com/oekit/registry v0.5.12
 	github.com/oekit/registry/nacos v0.1.12
@@ -61,7 +61,7 @@ require (
 	github.com/modern-go/reflect2 v1.0.2 // indirect
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
 	github.com/nacos-group/nacos-sdk-go/v2 v2.3.6-0.20260601044846-0e3d1d099507 // indirect
-	github.com/oekit/concurrency v0.31.1 // indirect
+	github.com/oekit/concurrency v0.31.2 // indirect
 	github.com/oekit/core v0.13.6 // indirect
 	github.com/oekit/pkg v0.41.1 // indirect
 	github.com/oekit/registry/nacosimpl v0.1.12 // indirect

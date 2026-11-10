@@ -181,7 +181,15 @@ func (f *GRPCEndpointFactory) MakeEndpoint(serviceName string, opts ...grpc.Dial
 		// done 回写与 http.go 同构（#57）：本次调用的最终结果确定后回调——
 		// 此前只在 pool.Get 失败路径回调一次，Invoke 结果从不回写 ⇒ p2c 的
 		// 节点级 EWMA 恒 0，故障/慢节点永不降权。
-		done(ctx, loadbalance.DoneInfo{Err: err})
+		//
+		// #124：回写错误经 nodeFaultErr 归属过滤——gRPC 调用方错误码
+		// （InvalidArgument/NotFound/PermissionDenied 等，HTTP 4xx 同构
+		// 语义，见 grpcCallerCode）归一为 nil：参数校验失败风暴不得把
+		// p2c 流量推离只是碰上坏请求的健康节点，熔断样本
+		// （breakerSuccessful）与均衡器样本的错误归属保持同一口径。
+		// 节点/网络错误（Internal/Unavailable/DeadlineExceeded 等）原样
+		// 回写，EWMA 惩罚语义不变（#74）。
+		done(ctx, loadbalance.DoneInfo{Err: nodeFaultErr(err)})
 
 		if err != nil {
 			return nil, err

@@ -1,6 +1,6 @@
 # AGENTS.md — oekit/nns-endpoint
 
-> NNS 端点工厂——per-service 熔断、换实例重试、gRPC 池；错误归属分类面（callerFault：HTTP 4xx / gRPC 调用方错误码 / 本地编解码确定性错误——不换实例重试、不计熔断失败、不做节点 EWMA 惩罚，熔断样本与 p2c done 样本同口径，#123/#124）
+> NNS 端点工厂——per-service 熔断、换实例重试、gRPC 池
 > 当前版本：`v0.3.4` · module：`github.com/oekit/nns-endpoint` · org：[oekit = Open Easy Kit](https://oekit.github.io)
 
 ## 本仓包含

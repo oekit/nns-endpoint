@@ -2,6 +2,14 @@
 
 由 ekit v0.34.0（git.enjoye.top/enjoydream/ekit，冻结维护）拆分而来。所有 notable 变更记录如下。
 
+## [v0.3.4] — 2026-11-11
+
+- fix(http): 确定性本地错误（响应解码/请求序列化/选点）判为不可重试、不计熔断样本（#123）——错误分类维度从「有无 statusError」改为「错误归属」：新增 `localError` 包装（`errors.As` 判定），marshal/unmarshal/select 类错误重试同一输入恒失败，此前却无 statusError 被判为可重试网络错误，每个坏请求白打 (1+Retry) 次真实 HTTP、每次 done(Err) 给节点记 EWMA 故障，连续 6 次调用即把整个服务熔断打开；2xx 空响应体 + Result 非 nil 视同 json null（跳过解码返回保持零值的 Result），不再报 unexpected end of JSON input
+- fix(endpoint): done 回写区分错误归属——调用方错误不惩罚节点（#124）——HTTP 4xx 与 gRPC 调用方错误码（InvalidArgument/NotFound/PermissionDenied 等按 grpc-go HTTP 映射落在 4xx 区间的码）经 `callerFault` 归属判定后回写 `DoneInfo{Err: nil}`，p2c EWMA 不再把流量推离只是碰上坏请求的健康节点（#97 同污染通道另一入口）；熔断样本（`breakerSuccessful`）与均衡器样本自此同口径。节点/网络错误（5xx/网络层/Internal/Unavailable/DeadlineExceeded）原样回写，惩罚语义不变
+- chore: 现代语言特性贴合——`errors.As/Is` 错误归属判定、`for range int` 测试循环、`min()` 响应体截断
+
+关联问题单：nns-endpoint#123、nns-endpoint#124。
+
 ## [v0.3.3] — 2026-11-10
 
 - - build: 依赖地板对齐（第二轮发版后 floor sync，无代码变更）

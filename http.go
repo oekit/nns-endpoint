@@ -109,8 +109,9 @@ func (f *HTTPEndpointFactory) ResetSelector(serviceName string) {
 //
 // 重试语义（消费服务配置 ServiceBasic.Retry，Nacos 配置缺省 3）：
 // 失败时换实例重试，最多额外 Retry 次尝试；5xx 与网络错误重试，
-// 4xx 不重试（确定性请求错误）。熔断 Execute 包住整组尝试——
-// 一次调用计一次熔断样本（与 httpx.WithCircuitBreaker +
+// 4xx 不重试（确定性请求错误）；本地确定性错误（序列化/解码/选点，
+// #123）重试同一输入恒失败，同样不重试、不计熔断样本。熔断 Execute
+// 包住整组尝试——一次调用计一次熔断样本（与 httpx.WithCircuitBreaker +
 // WithRetryConfig 的层次结构一致），避免单次调用的多次尝试
 // 撑爆连续失败计数。每次尝试独立 per-attempt 超时，最坏总耗时
 // 为 (1+Retry) × ReadTimeout。
@@ -201,11 +202,18 @@ func (f *HTTPEndpointFactory) MakeEndpoint(serviceName string) (Endpoint, error)
 func (f *HTTPEndpointFactory) attemptOnce(ctx context.Context, sel loadbalance.Selector, nodes []loadbalance.Node, req HTTPRequest, timeout time.Duration) (any, error) {
 	n, done, err := sel.Select(ctx, nodes)
 	if err != nil {
-		return nil, err
+		// #123：选点失败是本地确定性错误（候选集与过滤条件给定后重试
+		// 同一输入恒失败，且无节点被选中、不构成后端故障样本）——包装为
+		// localError：不换实例重试、不计熔断失败。
+		return nil, localErrorf("select node: %w", err)
 	}
 
 	resp, callErr := f.doRequest(ctx, n.Address(), req, timeout)
-	done(ctx, loadbalance.DoneInfo{Err: callErr})
+	// #124：done 回写区分错误归属——调用方错误（HTTP 4xx / 本地确定性
+	// 错误）归一为 nil 回写，p2c EWMA 不惩罚「碰巧被选中的节点」；
+	// 节点/网络错误原样回写，故障/慢节点照常降权。与熔断样本
+	// （breakerSuccessful）同一 callerFault 口径。
+	done(ctx, loadbalance.DoneInfo{Err: nodeFaultErr(callErr)})
 	return resp, callErr
 }
 
@@ -249,7 +257,9 @@ func (f *HTTPEndpointFactory) doRequest(ctx context.Context, addr string, req HT
 	if req.Body != nil {
 		data, err := json.Marshal(req.Body)
 		if err != nil {
-			return nil, fmt.Errorf("marshal body: %w", err)
+			// #123：请求体序列化失败是本地确定性错误——重试恒失败，
+			// 请求也从未到达节点，不构成后端故障样本。
+			return nil, localErrorf("marshal body: %w", err)
 		}
 		hReq.SetBody(data)
 		hReq.Header.SetContentTypeBytes([]byte("application/json"))
@@ -262,16 +272,24 @@ func (f *HTTPEndpointFactory) doRequest(ctx context.Context, addr string, req HT
 	code := hResp.StatusCode()
 	if code < 200 || code >= 300 {
 		msg := string(hResp.Body())
-		if len(msg) > 500 {
-			msg = msg[:500]
-		}
+		msg = msg[:min(len(msg), 500)]
 		// statusError 携带状态码：4xx 不计熔断失败、不重试，5xx 反之
 		return nil, &statusError{code: code, err: fmt.Errorf("http error: %d %s", code, msg)}
 	}
 
 	if req.Result != nil {
+		if body := hResp.Body(); len(body) == 0 {
+			// #123：2xx 空响应体（204 No Content 常见）+ Result 非 nil
+			// 视同 json null——跳过解码返回保持零值的 Result。此前
+			// json.Unmarshal 空切片必报 unexpected end of JSON input，
+			// 且无 statusError 被判为可重试网络错误：每个坏请求白打
+			// (1+Retry) 次真实 HTTP，连续 6 次调用即把熔断打开。
+			return req.Result, nil
+		}
 		if err := json.Unmarshal(hResp.Body(), req.Result); err != nil {
-			return nil, fmt.Errorf("unmarshal response: %w", err)
+			// #123：响应解码失败是本地确定性错误（调用方声明的 Result
+			// 与响应契约不符）——重试恒失败，不构成后端故障样本。
+			return nil, localErrorf("unmarshal response: %w", err)
 		}
 		return req.Result, nil
 	}

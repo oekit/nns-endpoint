@@ -268,6 +268,101 @@ func TestGRPCEndpoint_BreakerRejectionSkipsNodeDone(t *testing.T) {
 	}
 }
 
+// TestGRPCEndpoint_CallerErrorNotChargedToNode 是 #124 的回归测试：
+// done 回写区分错误归属——gRPC 调用方错误码（InvalidArgument 等，HTTP
+// 4xx 同构语义）不回写节点惩罚：调用方 bug 打出的错误风暴不得把 p2c
+// 流量推离只是碰上坏请求的健康节点；节点/网络错误（Internal）仍原样
+// 回写，EWMA 惩罚语义不变（#74）。
+func TestGRPCEndpoint_CallerErrorNotChargedToNode(t *testing.T) {
+	dialOpts := newBufconnGRPCServer(t, "nns.test.EchoService", map[string]func(ctx context.Context, req *wrapperspb.StringValue) (*wrapperspb.StringValue, error){
+		"BadArg": func(_ context.Context, _ *wrapperspb.StringValue) (*wrapperspb.StringValue, error) {
+			return nil, status.Error(codes.InvalidArgument, "bad arg")
+		},
+		"Boom": func(_ context.Context, _ *wrapperspb.StringValue) (*wrapperspb.StringValue, error) {
+			return nil, status.Error(codes.Internal, "boom")
+		},
+	})
+
+	rec := &recordingSelector{}
+	factory := newGRPCFactoryWithBufconn(t, dialOpts, WithSelector(rec))
+	defer factory.Close()
+
+	ep, err := factory.MakeEndpoint("svc-a", dialOpts...)
+	if err != nil {
+		t.Fatalf("MakeEndpoint: %v", err)
+	}
+	call := func(method string) error {
+		_, callErr := ep(context.Background(), GRPCRequest{
+			GrpcServiceName: "nns.test.EchoService",
+			Method:          method,
+			Request:         wrapperspb.String("x"),
+			Reply:           &wrapperspb.StringValue{},
+		})
+		return callErr
+	}
+
+	// 调用方错误码：调用报错，但节点不得被记故障惩罚
+	if err := call("BadArg"); status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("expected InvalidArgument to propagate, got: %v", err)
+	}
+	if errs := rec.doneErrs(); len(errs) != 1 || errs[0] != nil {
+		t.Fatalf("gRPC caller error must not charge the selected node, done samples = %v", errs)
+	}
+
+	// 节点/网络错误：原样回写，EWMA 惩罚语义不变
+	if err := call("Boom"); status.Code(err) != codes.Internal {
+		t.Fatalf("expected Internal to propagate, got: %v", err)
+	}
+	errs := rec.doneErrs()
+	if len(errs) != 2 {
+		t.Fatalf("expected exactly 2 done samples, got %d", len(errs))
+	}
+	if errs[1] == nil {
+		t.Fatal("gRPC node error must keep charging the node (EWMA penalty semantics unchanged)")
+	}
+	if status.Code(errs[1]) != codes.Internal {
+		t.Fatalf("node fault done sample must carry the Invoke error, got: %v", errs[1])
+	}
+}
+
+// TestGRPCEndpoint_CallerErrorDoesNotTripBreaker 是 #124 的回归测试：
+// 连续 gRPC 调用方错误（InvalidArgument 风暴）不计熔断失败——
+// callerFault 归属口径统一进 breakerSuccessful 后，熔断样本与均衡器
+// 样本对「错误归谁」的判定一致（修复前无 statusError ⇒ 连续失败，
+// 第 7 次调用起被 ErrCircuitOpen 掩盖真实错误形态）。
+func TestGRPCEndpoint_CallerErrorDoesNotTripBreaker(t *testing.T) {
+	dialOpts := newBufconnGRPCServer(t, "nns.test.EchoService", map[string]func(ctx context.Context, req *wrapperspb.StringValue) (*wrapperspb.StringValue, error){
+		"BadArg": func(_ context.Context, _ *wrapperspb.StringValue) (*wrapperspb.StringValue, error) {
+			return nil, status.Error(codes.InvalidArgument, "bad arg")
+		},
+	})
+
+	factory := newGRPCFactoryWithBufconn(t, dialOpts)
+	defer factory.Close()
+
+	ep, err := factory.MakeEndpoint("svc-a", dialOpts...)
+	if err != nil {
+		t.Fatalf("MakeEndpoint: %v", err)
+	}
+
+	// 远超默认 ReadyToTrip 阈值（连续失败 > 5）的调用方错误调用，
+	// 每次都必须保持 InvalidArgument 错误形态（不得被 ErrCircuitOpen 掩盖）
+	for range 10 {
+		_, callErr := ep(context.Background(), GRPCRequest{
+			GrpcServiceName: "nns.test.EchoService",
+			Method:          "BadArg",
+			Request:         wrapperspb.String("x"),
+			Reply:           &wrapperspb.StringValue{},
+		})
+		if status.Code(callErr) != codes.InvalidArgument {
+			t.Fatalf("caller error must not trip the breaker, got: %v", callErr)
+		}
+	}
+	if state := factory.breakers.getOrCreate("svc-a").State(); state != gobreaker.StateClosed {
+		t.Fatalf("expected breaker closed after 10 consecutive caller errors, got %v", state)
+	}
+}
+
 // TestGRPCEndpoint_ReplyAndRequestValidation 覆盖 #71/#73 的前置校验：
 // 缺 Reply 或 Request 非 proto.Message 时，端点必须在发起调用前报
 // 配置性错误（无需真实服务器——校验先于实例选择）。

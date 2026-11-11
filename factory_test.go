@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/oekit/httpx"
 	"github.com/oekit/httpx/loadbalance"
@@ -304,5 +306,83 @@ func TestSelectorCache_NoConfigStoreFallbackDefaults(t *testing.T) {
 	}
 	if got := selectorKind(sel); got != selectorKind(wantRR) {
 		t.Fatalf("expected default roundrobin selector, got %s", got)
+	}
+}
+
+// blockingConfigStore 的 GetConfig 阻塞在 release 上（#136 回归测试用）：
+// singleflight 的 leader 在此挂起，flight 保持打开，其余并发方全部作为
+// 等待方挂进同一 flight——计数由此完全确定（flight 结束前无人再执行）。
+type blockingConfigStore struct {
+	content string
+	calls   atomic.Int32
+	release chan struct{}
+}
+
+func (s *blockingConfigStore) GetConfig(_ context.Context, _, _ string) (string, error) {
+	s.calls.Add(1)
+	<-s.release
+	return s.content, nil
+}
+
+func (s *blockingConfigStore) ListenConfig(context.Context, string, string, func(string)) error {
+	return nil
+}
+
+func (s *blockingConfigStore) StopListenConfig(context.Context, string, string) error {
+	return nil
+}
+
+// TestSelectorCache_ConcurrentFirstBuildSingleflight 是 #136 的回归测试：
+// 并发首建同一服务只允许一次配置拉取、共享同一个 selector 实例——此前
+// 快路径未命中后 N 个并发首调各自拉配置、各建一个 selector，仅靠写锁
+// double-check 留下最后一个，其余白白丢弃（N-1 次配置中心 IO 与构造全废）。
+//
+// 确定性手法：leader 的 GetConfig 挂在 release 上不返回；主测等全部并发
+// 方抵达 getOrCreate 入口后（flight 内缓存写入已就位，flight 结束后到达
+// 的调用只会走快路径）再放行——calls==1 是结构保证，不依赖时序。
+func TestSelectorCache_ConcurrentFirstBuildSingleflight(t *testing.T) {
+	const n = 32
+	store := &blockingConfigStore{content: `{"lb":"p2c"}`, release: make(chan struct{})}
+	c := nnsclient.New(nnsclient.WithConfigStore(store))
+	factory := NewHTTPEndpointFactory(c)
+	defer factory.Close()
+
+	sels := make([]loadbalance.Selector, n)
+	start := make(chan struct{})
+	entered := make(chan struct{}, n)
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			entered <- struct{}{} // 抵达 getOrCreate 入口
+			s, err := factory.selectorCache.getOrCreate(context.Background(), "svc-a")
+			if err != nil {
+				t.Errorf("getOrCreate: %v", err)
+				return
+			}
+			sels[i] = s
+		}(i)
+	}
+	close(start)
+	// 等全部并发方抵达入口（flight 打开期间，后来者只会挂为等待方或走快路径）
+	for cnt := 0; cnt < n; cnt++ {
+		select {
+		case <-entered:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("only %d/%d goroutines reached getOrCreate in time", cnt, n)
+		}
+	}
+	close(store.release) // 放行 leader，flight 完成
+	wg.Wait()
+
+	if got := store.calls.Load(); got != 1 {
+		t.Fatalf("concurrent first build must fetch config exactly once (singleflight #136), got %d", got)
+	}
+	for i := 1; i < n; i++ {
+		if sels[i] != sels[0] {
+			t.Fatalf("concurrent first build must share one selector instance, goroutine %d got a different one", i)
+		}
 	}
 }

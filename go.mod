@@ -4,14 +4,15 @@ go 1.26.0
 
 require (
 	github.com/cloudwego/hertz v0.10.6
-	github.com/oekit/httpx v0.10.0
+	github.com/oekit/httpx v0.11.0
 	github.com/oekit/logx v0.10.0
 	github.com/oekit/metrics v0.3.0
-	github.com/oekit/nns v0.6.0
+	github.com/oekit/nns v0.8.0
 	github.com/oekit/registry v0.5.15
 	github.com/oekit/registry/nacos v0.1.14
 	github.com/prometheus/client_golang v1.25.0
 	github.com/sony/gobreaker v1.0.0
+	golang.org/x/sync v0.24.0
 	google.golang.org/grpc v1.85.0
 	google.golang.org/protobuf v1.36.12
 )
@@ -61,9 +62,9 @@ require (
 	github.com/modern-go/reflect2 v1.0.2 // indirect
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
 	github.com/nacos-group/nacos-sdk-go/v2 v2.3.6 // indirect
-	github.com/oekit/concurrency v0.33.0 // indirect
+	github.com/oekit/concurrency v0.34.0 // indirect
 	github.com/oekit/core v0.14.2 // indirect
-	github.com/oekit/pkg v0.45.0 // indirect
+	github.com/oekit/pkg v0.46.0 // indirect
 	github.com/oekit/registry/nacosimpl v0.2.0 // indirect
 	github.com/orcaman/concurrent-map v0.0.0-20210501183033-44dafcb38ecc // indirect
 	github.com/pkg/errors v0.9.1 // indirect
@@ -85,7 +86,6 @@ require (
 	golang.org/x/arch v0.14.0 // indirect
 	golang.org/x/crypto v0.58.0 // indirect
 	golang.org/x/net v0.62.0 // indirect
-	golang.org/x/sync v0.24.0 // indirect
 	golang.org/x/sys v0.49.0 // indirect
 	golang.org/x/text v0.43.0 // indirect
 	golang.org/x/time v0.16.0 // indirect

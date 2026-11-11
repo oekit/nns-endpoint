@@ -3,7 +3,6 @@ package endpoint
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net/url"
 	"strings"
@@ -18,7 +17,6 @@ import (
 	"github.com/oekit/httpx/loadbalance"
 	"github.com/oekit/logx"
 	"github.com/oekit/registry"
-	"github.com/sony/gobreaker"
 )
 
 var epLog = logx.Delegating("nns-endpoint")
@@ -41,6 +39,10 @@ type HTTPEndpointFactory struct {
 	selectorCache *selectorCache
 	breakers      *breakerCache
 	metrics       *resilience.Metrics
+	// configChangeHandle 是构造期在 client 上注册的配置变更回调句柄，
+	// Close 时据此注销（#135）：不注销则 client 经回调闭包长持已废弃
+	// 工厂（selectorCache/breakers 无法回收），配置事件继续打在死工厂上。
+	configChangeHandle *nnsclient.ConfigChangeHandle
 }
 
 // metricsKind 是本工厂在弹性指标里的 kind 标签值。
@@ -93,7 +95,9 @@ func NewHTTPEndpointFactory(c *nnsclient.ServiceClient, opts ...EndpointFactoryO
 		metrics:       tmpl.metrics,
 	}
 
-	c.OnConfigChange(func(serviceName string) {
+	// #135：注册即存句柄——工厂级恰好一次注册（构造期），Close 按句柄
+	// 注销；OffConfigChange 幂等，重复 Close 安全。
+	f.configChangeHandle = c.OnConfigChange(func(serviceName string) {
 		f.selectorCache.reset(serviceName)
 	})
 
@@ -181,13 +185,12 @@ func (f *HTTPEndpointFactory) MakeEndpoint(serviceName string) (Endpoint, error)
 			return nil, lastErr
 		})
 		if err != nil {
-			// #58：ErrTooManyRequests（half-open 态并发超 MaxRequests）同属
-			// 熔断拒绝，与 ErrOpenState 一并映射（含 ObserveRejected）
-			if errors.Is(err, gobreaker.ErrOpenState) || errors.Is(err, gobreaker.ErrTooManyRequests) {
-				if f.metrics != nil {
-					f.metrics.ObserveRejected(serviceName, httpMetricsKind)
-				}
-				return nil, fmt.Errorf("%w: service=%s", ErrCircuitOpen, serviceName)
+			// #58/#133：熔断拒绝映射收敛到 rejectIfCircuitOpen 单源——
+			// ErrOpenState 与 ErrTooManyRequests（half-open 态并发超
+			// MaxRequests）均映射 ErrCircuitOpen（含 ObserveRejected），
+			// 非熔断拒绝原样透出
+			if rejErr := rejectIfCircuitOpen(err, serviceName, httpMetricsKind, f.metrics); rejErr != nil {
+				return nil, rejErr
 			}
 			return nil, err
 		}
@@ -219,9 +222,14 @@ func (f *HTTPEndpointFactory) attemptOnce(ctx context.Context, sel loadbalance.S
 
 // Close 关闭 HTTP 端点工厂持有的资源。
 // Hertz client 连接池无显式释放 API（随进程生命周期），httpx.Client
-// 的 endpointManager 在本工厂场景未启用，故此处无资源可释放；
-// 保留方法以满足工厂统一 Close 契约。
-func (f *HTTPEndpointFactory) Close() {}
+// 的 endpointManager 在本工厂场景未启用；此处注销构造期在 client 上
+// 注册的配置变更回调（#135）——否则 client 经回调闭包长持已废弃工厂，
+// selectorCache/breakers 无法回收，配置事件继续打在死工厂上。
+// OffConfigChange 幂等，Close 可安全重复调用。
+func (f *HTTPEndpointFactory) Close() {
+	f.client.OffConfigChange(f.configChangeHandle)
+	f.configChangeHandle = nil
+}
 
 func (f *HTTPEndpointFactory) doRequest(ctx context.Context, addr string, req HTTPRequest, timeout time.Duration) (any, error) {
 	// 只规整 addr 侧的尾斜杠用于拼接；TrimRight 整串曾把调用方声明的

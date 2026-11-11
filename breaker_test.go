@@ -10,6 +10,9 @@ import (
 	nnsclient "github.com/oekit/nns/client"
 	"github.com/oekit/registry"
 	"github.com/sony/gobreaker"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/types/known/wrapperspb"
 )
 
 // TestBreakerCache_PerServiceIsolation 验证熔断器按服务分片：
@@ -136,5 +139,65 @@ func TestResetSelector_AppliesToExistingEndpoints(t *testing.T) {
 	}
 	if fresh == old {
 		t.Fatal("existing endpoint still uses the old selector after ResetSelector")
+	}
+}
+
+// TestRejectIfCircuitOpen 钉住 #133 收敛后的单源映射行为（HTTP/gRPC 两工厂
+// 共用，规则演进只改这一处）：
+//   - 非熔断拒绝（普通错误）→ nil，调用方继续原错误路径；
+//   - ErrOpenState → ErrCircuitOpen（errors.Is 可判定，带 service 上下文）；
+//   - ErrTooManyRequests（half-open 态并发超 MaxRequests）→ 同映射。
+func TestRejectIfCircuitOpen(t *testing.T) {
+	if got := rejectIfCircuitOpen(errors.New("boom"), "svc-a", httpMetricsKind, nil); got != nil {
+		t.Fatalf("non-breaker rejection must return nil, got: %v", got)
+	}
+
+	err := rejectIfCircuitOpen(gobreaker.ErrOpenState, "svc-a", httpMetricsKind, nil)
+	if !errors.Is(err, ErrCircuitOpen) {
+		t.Fatalf("ErrOpenState must map to ErrCircuitOpen, got: %v", err)
+	}
+	if !containsAny(err.Error(), "service=svc-a") {
+		t.Errorf("mapped error must carry service context, got: %v", err)
+	}
+
+	err = rejectIfCircuitOpen(gobreaker.ErrTooManyRequests, "svc-b", grpcMetricsKind, nil)
+	if !errors.Is(err, ErrCircuitOpen) {
+		t.Fatalf("ErrTooManyRequests must map to ErrCircuitOpen, got: %v", err)
+	}
+}
+
+// TestGRPCEndpoint_CircuitBreakerOpenMapsToErrCircuitOpen 端到端验证 gRPC
+// 路径的熔断拒绝映射（#133，与 HTTP 侧
+// TestHTTPEndpoint_CircuitBreakerIsolatedPerService 对称）：svc-a 连续失败
+// 熔断后，下一次调用必须得到 ErrCircuitOpen（而非 gobreaker 的裸
+// ErrOpenState），且熔断拒绝发生在 done 回写之前（#97 语义不回退）。
+func TestGRPCEndpoint_CircuitBreakerOpenMapsToErrCircuitOpen(t *testing.T) {
+	dialOpts := newBufconnGRPCServer(t, "nns.test.EchoService", map[string]func(ctx context.Context, req *wrapperspb.StringValue) (*wrapperspb.StringValue, error){
+		"Echo": func(_ context.Context, req *wrapperspb.StringValue) (*wrapperspb.StringValue, error) {
+			return nil, status.Error(codes.Internal, "boom")
+		},
+	})
+
+	c := nnsclient.New(
+		nnsclient.WithMockMode(true),
+		nnsclient.WithStaticInstances("svc-a", []registry.Instance{{IP: "10.7.0.1", Port: 1}}),
+	)
+	factory := NewGRPCEndpointFactory(c)
+	defer factory.Close()
+
+	ep, err := factory.MakeEndpoint("svc-a", dialOpts...)
+	if err != nil {
+		t.Fatalf("MakeEndpoint: %v", err)
+	}
+
+	// ReadyToTrip: ConsecutiveFailures > 5，6 次失败（Internal 非调用方
+	// 错误，计熔断样本）后熔断打开；第 7 次调用被拒绝。
+	req := GRPCRequest{Request: wrapperspb.String("x"), Reply: &wrapperspb.StringValue{}}
+	var lastErr error
+	for i := 0; i < 7; i++ {
+		_, lastErr = ep(context.Background(), req)
+	}
+	if lastErr == nil || !errors.Is(lastErr, ErrCircuitOpen) {
+		t.Fatalf("expected gRPC circuit open error (errors.Is ErrCircuitOpen), got: %v", lastErr)
 	}
 }

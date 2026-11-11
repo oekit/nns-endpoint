@@ -2,7 +2,6 @@ package endpoint
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"time"
 
@@ -12,7 +11,6 @@ import (
 
 	"github.com/oekit/httpx/loadbalance"
 	"github.com/oekit/registry"
-	"github.com/sony/gobreaker"
 	"google.golang.org/grpc"
 	"google.golang.org/protobuf/proto"
 )
@@ -51,6 +49,11 @@ type GRPCEndpointFactory struct {
 	selectorCache *selectorCache
 	breakers      *breakerCache
 	metrics       *resilience.Metrics
+	// configChangeHandle 是构造期在 client 上注册的配置变更回调句柄，
+	// Close 时据此注销（#135）：不注销则 client 经回调闭包长持已废弃
+	// 工厂（selectorCache/breakers/pool 无法回收），配置事件继续打在
+	// 死工厂上。
+	configChangeHandle *nnsclient.ConfigChangeHandle
 }
 
 // grpcMetricsKind 是本工厂在弹性指标里的 kind 标签值。
@@ -71,8 +74,9 @@ func NewGRPCEndpointFactory(c *nnsclient.ServiceClient, opts ...EndpointFactoryO
 		metrics:       tmpl.metrics,
 	}
 
-	// 配置变更时重置选择器缓存
-	c.OnConfigChange(func(serviceName string) {
+	// 配置变更时重置选择器缓存。#135：注册即存句柄——工厂级恰好一次
+	// 注册（构造期），Close 按句柄注销；OffConfigChange 幂等，重复 Close 安全。
+	f.configChangeHandle = c.OnConfigChange(func(serviceName string) {
 		f.selectorCache.reset(serviceName)
 	})
 
@@ -130,7 +134,12 @@ func (f *GRPCEndpointFactory) MakeEndpoint(serviceName string, opts ...grpc.Dial
 		)
 		n, done, err := sel.Select(ctx, nodes)
 		if err != nil {
-			return nil, err
+			// #137：选点失败是本地确定性错误（候选集与过滤条件给定后重试
+			// 同一输入恒失败，且无节点被选中、不构成后端故障样本）——包装为
+			// localError，与 HTTP 路径（attemptOnce）及 errors.go 的
+			// localError 契约一致：消费方按 localFault/callerFault 归类时
+			// 不再误判为节点/网络故障。
+			return nil, localErrorf("select node: %w", err)
 		}
 
 		conn, err := f.pool.Acquire(ctx, n.Address(), opts...)
@@ -158,11 +167,6 @@ func (f *GRPCEndpointFactory) MakeEndpoint(serviceName string, opts ...grpc.Dial
 			return req.Reply, invokeErr
 		})
 
-		// #58：half-open 态并发超过 MaxRequests 时 gobreaker 返回的是
-		// ErrTooManyRequests（非 ErrOpenState）——同样是熔断拒绝，一并映射
-		// ErrCircuitOpen + 计 ObserveRejected（此前裸透出，消费方的
-		// errors.Is(err, ErrCircuitOpen) 判定失效）。
-		//
 		// #97：熔断拒绝必须在 done 回写**之前**拦截——Execute 即刻返回
 		// ErrOpenState/ErrTooManyRequests 时调用从未发出（gobreaker 没有
 		// 执行 fn），把拒绝按 Err 回写到本次 Select 选中的节点，会让 p2c
@@ -171,11 +175,11 @@ func (f *GRPCEndpointFactory) MakeEndpoint(serviceName string, opts ...grpc.Dial
 		// 分布被反向扭曲。HTTP 路径的 done 在 attemptOnce 内（Execute 包在
 		// 重试循环外），熔断拒绝不会到达 attemptOnce，天然无此问题——此处
 		// 显式跳过回写对齐。
-		if errors.Is(err, gobreaker.ErrOpenState) || errors.Is(err, gobreaker.ErrTooManyRequests) {
-			if f.metrics != nil {
-				f.metrics.ObserveRejected(serviceName, grpcMetricsKind)
-			}
-			return nil, fmt.Errorf("%w: service=%s", ErrCircuitOpen, serviceName)
+		//
+		// #58/#133：ErrTooManyRequests 与 ErrOpenState 同属熔断拒绝，映射
+		// 收敛到 rejectIfCircuitOpen 单源（ErrCircuitOpen + ObserveRejected）。
+		if rejErr := rejectIfCircuitOpen(err, serviceName, grpcMetricsKind, f.metrics); rejErr != nil {
+			return nil, rejErr
 		}
 
 		// done 回写与 http.go 同构（#57）：本次调用的最终结果确定后回调——
@@ -199,7 +203,12 @@ func (f *GRPCEndpointFactory) MakeEndpoint(serviceName string, opts ...grpc.Dial
 	}, nil
 }
 
-// Close 关闭 gRPC 端点工厂持有的连接池资源。
+// Close 关闭 gRPC 端点工厂持有的资源：先注销构造期在 client 上注册的
+// 配置变更回调（#135，不注销则 client 经回调闭包长持已废弃工厂、配置
+// 事件继续打在死工厂上），再关闭连接池。OffConfigChange 与 pool.Close
+// 均幂等，Close 可安全重复调用。
 func (f *GRPCEndpointFactory) Close() {
+	f.client.OffConfigChange(f.configChangeHandle)
+	f.configChangeHandle = nil
 	f.pool.Close()
 }

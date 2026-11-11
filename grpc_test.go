@@ -2,9 +2,12 @@ package endpoint
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/oekit/httpx/loadbalance"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/connectivity"
@@ -489,7 +492,7 @@ func TestGRPCPool_Acquire_FullPoolEvictSkipsInFlight(t *testing.T) {
 		},
 	})
 
-	pool := NewGRPCPoolWithSize(1)
+	pool := NewGRPCPool(1)
 	pool.idleTTL = 250 * time.Millisecond
 	defer pool.Close()
 
@@ -639,7 +642,7 @@ func TestGRPCPool_Release_IdentityCheck(t *testing.T) {
 // TestGRPCPool_Create_FullPoolRejectsWhenNoIdle 覆盖满池拒绝路径的边界：
 // 池满且没有空闲超龄条目可驱逐时，仍直接拒绝（max size reached）。
 func TestGRPCPool_Create_FullPoolRejectsWhenNoIdle(t *testing.T) {
-	pool := NewGRPCPoolWithSize(1)
+	pool := NewGRPCPool(1)
 	defer pool.Close()
 
 	conn1, err := pool.Get(context.Background(), "10.0.0.1:1", withTestInsecureCreds())
@@ -660,7 +663,7 @@ func TestGRPCPool_Create_FullPoolRejectsWhenNoIdle(t *testing.T) {
 // 场景：滚动发布换 IP 后旧地址连接无人再 Get——修复前空闲驱逐只在
 // Get(同 addr) 路径生效，池被陈旧连接占满时新地址一律 max size reached。
 func TestGRPCPool_Create_FullPoolEvictsIdleOtherAddr(t *testing.T) {
-	pool := NewGRPCPoolWithSize(1)
+	pool := NewGRPCPool(1)
 	defer pool.Close()
 
 	const (
@@ -706,5 +709,70 @@ func TestGRPCPool_Create_FullPoolEvictsIdleOtherAddr(t *testing.T) {
 	}
 	if state := connA.GetState(); state != connectivity.Shutdown {
 		t.Errorf("expected evicted old conn Shutdown, got %v", state)
+	}
+}
+
+// TestGRPCPool_ConstructorConsolidated 是 #134 的回归测试：构造器收敛为
+// NewGRPCPool(maxSize ...int) 单入口——无参默认、显式正值生效、非正值回退
+// 默认（原 NewGRPCPoolWithSize 的守卫语义）。
+func TestGRPCPool_ConstructorConsolidated(t *testing.T) {
+	if p := NewGRPCPool(); p.maxSize != defaultMaxPoolSize {
+		t.Errorf("no-arg: expected default maxSize %d, got %d", defaultMaxPoolSize, p.maxSize)
+	}
+	if p := NewGRPCPool(7); p.maxSize != 7 {
+		t.Errorf("explicit size: expected 7, got %d", p.maxSize)
+	}
+	for _, bad := range []int{0, -5} {
+		if p := NewGRPCPool(bad); p.maxSize != defaultMaxPoolSize {
+			t.Errorf("non-positive size %d: expected fallback to default %d, got %d", bad, defaultMaxPoolSize, p.maxSize)
+		}
+	}
+}
+
+// TestGRPCPool_ConstructorRejectsMultipleArgs 钉住变参误用 fail-fast：
+// 多于一个 maxSize 是编程错误，构造期 panic（AGENTS.md Option 总则①）。
+func TestGRPCPool_ConstructorRejectsMultipleArgs(t *testing.T) {
+	defer func() {
+		if r := recover(); r == nil {
+			t.Fatal("expected panic when passing more than one maxSize argument")
+		}
+	}()
+	_ = NewGRPCPool(1, 2)
+}
+
+// erroringSelector 选点恒失败（#137 回归测试用）。
+type erroringSelector struct{ err error }
+
+func (s *erroringSelector) Select(context.Context, []loadbalance.Node, ...loadbalance.SelectOption) (loadbalance.Node, loadbalance.DoneFunc, error) {
+	return nil, nil, s.err
+}
+
+// TestGRPCEndpoint_SelectFailureIsLocalError 是 #137 的回归测试：gRPC 路径
+// 选点失败必须包装为 localError（与 HTTP 路径及 errors.go 的 localError
+// 契约一致）——此前裸透出，消费方按 localFault/callerFault 归类时把它
+// 误判为节点/网络故障（重试、熔断样本、EWMA 惩罚全部错向）。
+func TestGRPCEndpoint_SelectFailureIsLocalError(t *testing.T) {
+	c := newTestServiceClient(t)
+	factory := NewGRPCEndpointFactory(c, WithSelector(&erroringSelector{err: errors.New("all nodes filtered out")}))
+	defer factory.Close()
+
+	ep, err := factory.MakeEndpoint("svc-a")
+	if err != nil {
+		t.Fatalf("MakeEndpoint: %v", err)
+	}
+
+	_, err = ep(context.Background(), GRPCRequest{Request: wrapperspb.String("x"), Reply: &wrapperspb.StringValue{}})
+	var le *localError
+	if !errors.As(err, &le) {
+		t.Fatalf("select failure must be wrapped as localError (#137), got %T: %v", err, err)
+	}
+	if !containsAny(err.Error(), "select node") {
+		t.Errorf("expected 'select node' context in error, got: %v", err)
+	}
+	if retryable(err) {
+		t.Error("local deterministic error must not be retryable")
+	}
+	if !callerFault(err) {
+		t.Error("local deterministic error must classify as caller fault (not a node fault)")
 	}
 }

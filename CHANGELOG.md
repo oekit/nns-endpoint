@@ -2,6 +2,10 @@
 
 由 ekit v0.34.0（git.enjoye.top/enjoydream/ekit，冻结维护）拆分而来。所有 notable 变更记录如下。
 
+## [v0.3.5] — 2026-11-12
+
+- Go 1.26 现代化清扫；依赖地板对齐（core v0.15.0、concurrency v0.34.1、pkg v0.46.0、httpx v0.11.0、nns v0.8.0 已随 #146 抬升）。纯等价重构+地板追平，行为零变更。
+
 ## [v0.3.4] — 2026-11-11
 
 - fix(http): 确定性本地错误（响应解码/请求序列化/选点）判为不可重试、不计熔断样本（#123）——错误分类维度从「有无 statusError」改为「错误归属」：新增 `localError` 包装（`errors.As` 判定），marshal/unmarshal/select 类错误重试同一输入恒失败，此前却无 statusError 被判为可重试网络错误，每个坏请求白打 (1+Retry) 次真实 HTTP、每次 done(Err) 给节点记 EWMA 故障，连续 6 次调用即把整个服务熔断打开；2xx 空响应体 + Result 非 nil 视同 json null（跳过解码返回保持零值的 Result），不再报 unexpected end of JSON input

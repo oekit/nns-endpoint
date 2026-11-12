@@ -5,6 +5,8 @@ import (
 	"fmt"
 
 	"github.com/oekit/httpx"
+	"github.com/oekit/metrics/resilience"
+	"github.com/sony/gobreaker"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -15,6 +17,24 @@ import (
 // 熔断行为共用一个可判定错误，消费方 errors.Is 任一别名均可识别，
 // 不必同时 import 两个包。
 var ErrCircuitOpen = httpx.ErrCircuitOpen
+
+// rejectIfCircuitOpen 判定熔断 Execute 的错误是否熔断拒绝（#58）：
+// open 态 gobreaker 返回 ErrOpenState，half-open 态并发超 MaxRequests 返回
+// ErrTooManyRequests——同为熔断拒绝，一并映射 ErrCircuitOpen（errors.Is
+// 可判定）并计弹性指标 ObserveRejected。
+//
+// 非熔断拒绝返回 nil，调用方继续原错误路径。此前该映射在 HTTP/gRPC 两个
+// 工厂的 MakeEndpoint 里逐行重复、仅 kind 常量不同（#133）：#58 的映射规则
+// 再演进（如新增半开状态细分）需要同步两处——收敛为本单源。
+func rejectIfCircuitOpen(err error, service, kind string, m *resilience.Metrics) error {
+	if !errors.Is(err, gobreaker.ErrOpenState) && !errors.Is(err, gobreaker.ErrTooManyRequests) {
+		return nil
+	}
+	if m != nil {
+		m.ObserveRejected(service, kind)
+	}
+	return fmt.Errorf("%w: service=%s", ErrCircuitOpen, service)
+}
 
 // statusError 携带 HTTP 状态码的响应错误，供熔断/重试按状态码分类。
 type statusError struct {

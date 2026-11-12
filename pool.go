@@ -51,22 +51,23 @@ type GRPCPool struct {
 }
 
 // NewGRPCPool 创建一个新的 gRPC 连接池实例。
-func NewGRPCPool() *GRPCPool {
+//
+// maxSize 可省略（缺省 defaultMaxPoolSize）；显式传入 ≤0 的值同样回退
+// 默认值（原 NewGRPCPoolWithSize 的守卫语义）。两个构造器除 maxSize 外
+// 逐行相同、且带尺寸形态全工作区仅测试使用（#134）——合并为单一构造器，
+// 公开面少一个入口。
+func NewGRPCPool(maxSize ...int) *GRPCPool {
+	if len(maxSize) > 1 {
+		// 构造期非法值 fail-fast（AGENTS.md Option 总则）：变参误用即编程错误
+		panic("nns-endpoint: NewGRPCPool accepts at most one maxSize argument")
+	}
+	size := defaultMaxPoolSize
+	if len(maxSize) == 1 && maxSize[0] > 0 {
+		size = maxSize[0]
+	}
 	return &GRPCPool{
 		conns:   make(map[string]*connEntry),
-		maxSize: defaultMaxPoolSize,
-		idleTTL: defaultIdleTTL,
-	}
-}
-
-// NewGRPCPoolWithSize 创建指定最大连接数的 gRPC 连接池。
-func NewGRPCPoolWithSize(maxSize int) *GRPCPool {
-	if maxSize <= 0 {
-		maxSize = defaultMaxPoolSize
-	}
-	return &GRPCPool{
-		conns:   make(map[string]*connEntry),
-		maxSize: maxSize,
+		maxSize: size,
 		idleTTL: defaultIdleTTL,
 	}
 }

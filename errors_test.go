@@ -14,10 +14,12 @@ func statusErrOf(code int) error {
 	return &statusError{code: code, err: fmt.Errorf("http error: %d", code)}
 }
 
-// TestCallerFault_Classification 钉住错误归属分类面（#123/#124）：
+// TestCallerFault_Classification 钉住错误归属分类面（#123/#124/#140）：
 // callerFault 是熔断（breakerSuccessful）、换实例重试（retryable）与
 // 均衡器 done 回写（nodeFaultErr）三个消费点的同一口径——调用方错误
-// （HTTP 4xx / gRPC 调用方错误码 / 本地确定性错误）不构成对节点的指控。
+// （HTTP 1xx/3xx/4xx / gRPC 调用方错误码 / 本地确定性错误）不构成对节点
+// 的指控。#140：3xx 行是本测试此前缺失的缝——恒 302 的健康服务曾被计
+// 熔断失败并惩罚节点，与「对齐 httpx 的 >=500 失败判定」相反。
 func TestCallerFault_Classification(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -25,6 +27,10 @@ func TestCallerFault_Classification(t *testing.T) {
 		caller bool // true = 归属调用方（不惩罚节点/不计熔断失败/不重试）
 	}{
 		{"nil", nil, false},
+		{"http 100", statusErrOf(100), true},
+		{"http 301", statusErrOf(301), true},
+		{"http 302", statusErrOf(302), true},
+		{"http 304", statusErrOf(304), true},
 		{"http 400", statusErrOf(400), true},
 		{"http 422", statusErrOf(422), true},
 		{"http 499", statusErrOf(499), true},
@@ -72,6 +78,7 @@ func TestRetryable_Classification(t *testing.T) {
 	}{
 		{"http 500", statusErrOf(500), true},
 		{"network error", errors.New("dial tcp: i/o timeout"), true},
+		{"http 302", statusErrOf(302), false}, // #140：3xx 与 4xx 同侧，确定性响应不重试
 		{"http 400", statusErrOf(400), false},
 		{"local marshal", localErrorf("marshal body: %w", errors.New("unsupported type")), false},
 		{"local unmarshal", localErrorf("unmarshal response: %w", errors.New("invalid character")), false},

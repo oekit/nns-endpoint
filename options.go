@@ -79,10 +79,18 @@ func WithSelector(sel loadbalance.Selector) EndpointFactoryOption {
 	}
 }
 
-// WithMetrics 启用弹性指标（熔断状态/迁移/拒绝 + 重试尝试），
-// 形态对齐 httpx.WithMetrics。reg 为 nil 时用全局 DefaultRegisterer；
-// namespace 为空时用 "nns_endpoint"。多个工厂共享同一 Registry +
-// namespace 时复用已注册 collector。
+// WithMetrics 启用弹性指标（熔断状态/迁移/拒绝 + 重试尝试）。
+// reg 为 nil 时回退到 oekit/metrics 的平台 Registry（metrics.Registry，
+// 平台 /metrics 端点暴露的自定义 registry，与 metrics#50 后
+// resilience.NewMetrics 的 nil 口径一致）；确需进 prom 默认全局 registry
+// 的调用方显式传 prom.DefaultRegisterer。namespace 为空时用
+// "nns_endpoint"。多个工厂共享同一 Registry + namespace 时复用已注册
+// collector。
+//
+// 注意：本仓与 httpx.WithMetrics 的 nil 语义**不同**（#144）——httpx 在调
+// NewMetrics 之前自行把 nil 回填为 prom.DefaultRegisterer，本仓把 nil
+// 原样透传给 resilience.NewMetrics（回退 metrics.Registry）。两仓 nil 落
+// 不同 registry，调用方跨仓对齐口径时以此为准。
 func WithMetrics(reg prom.Registerer, namespace string) EndpointFactoryOption {
 	return func(c *factoryConfig) {
 		if namespace == "" {

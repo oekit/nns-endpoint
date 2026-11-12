@@ -93,13 +93,21 @@ func grpcCallerCode(c codes.Code) bool {
 	}
 }
 
-// callerFault 判定错误是否归属调用方（错误归属分类面，#123/#124）。
+// callerFault 判定错误是否归属调用方（错误归属分类面，#123/#124/#140）。
 //
 // 三类调用方错误：
 //   - 本地确定性错误（localError）：序列化/解码/选点在本地即失败，
 //     请求可能根本未到达节点；
-//   - HTTP 4xx（statusError）：请求错误与对端健康无关；
+//   - HTTP 1xx/3xx/4xx（statusError）：4xx 是请求错误；3xx（重定向）是
+//     确定性响应——对端健康且正常应答，只是调用方需要跟随/改写跳转；
+//     1xx 同为非故障应答。三者均与节点健康无关（#140：此前 3xx 落在
+//     「非调用方错误」一侧，恒返回 302 的健康服务第 6 次调用即被熔断、
+//     节点被 EWMA 惩罚，与本文件声明的「对齐 httpx 的 >=500 失败判定」
+//     正好相反）；
 //   - gRPC 调用方错误码：HTTP 4xx 的同构语义（grpcCallerCode）。
+//
+// HTTP 状态码的口径由此收敛为单一判据「code < 500 = 非节点故障」：
+// 熔断失败 ⇔ 5xx 或网络错误，与 httpx.WithCircuitBreaker 完全一致。
 //
 // 该判定是熔断（breakerSuccessful）、换实例重试（retryable）与均衡器
 // done 回写（nodeFaultErr）三个消费点的同一口径——错误归属决定弹性
@@ -112,7 +120,9 @@ func callerFault(err error) bool {
 		return true
 	}
 	if code, ok := httpStatus(err); ok {
-		return code >= 400 && code < 500
+		// #140：4xx 与 1xx/3xx 都算调用方侧（非节点故障）——只有 5xx
+		// 构成节点/网络故障（对齐 httpx 的 >=500 失败判定）。
+		return code < 500
 	}
 	// 非 gRPC status 错误经 status.Code 归一为 Unknown（5xx 语义）：
 	// 未知错误按节点/网络故障处理，与既有行为一致。
@@ -132,11 +142,11 @@ func nodeFaultErr(err error) error {
 
 // breakerSuccessful 是熔断器的默认 IsSuccessful 判定。
 //
-// 判定维度是错误归属（#123/#124）：调用方错误（HTTP 4xx / gRPC 调用方
-// 错误码 / 本地确定性编解码错误，见 callerFault）不计熔断失败——与对端
-// 服务健康无关，若计入，单个调用方的 bug 请求足以把依赖熔断，惩罚
-// 所有调用方。网络错误与 5xx 仍计失败。
-// （对齐 httpx.WithCircuitBreaker 的 >=500 失败判定。）
+// 判定维度是错误归属（#123/#124/#140）：调用方错误（HTTP 1xx/3xx/4xx /
+// gRPC 调用方错误码 / 本地确定性编解码错误，见 callerFault）不计熔断
+// 失败——与对端服务健康无关，若计入，单个调用方的 bug 请求或一串正常
+// 的 302 重定向（#140）足以把健康依赖熔断，惩罚所有调用方。网络错误与
+// 5xx 仍计失败（对齐 httpx.WithCircuitBreaker 的 >=500 失败判定）。
 func breakerSuccessful(err error) bool {
 	return err == nil || callerFault(err)
 }
@@ -144,10 +154,10 @@ func breakerSuccessful(err error) bool {
 // retryable 判定错误是否值得换实例重试。
 //
 // 5xx 与网络错误可重试（对端故障或瞬态网络问题，换节点有意义）；
-// 4xx 是确定性请求错误，重试必然同样失败；本地确定性错误
-// （序列化/解码/选点，#123）重试同一输入恒失败，同样不可重试——
-// 此前它们无 statusError 被判为可重试网络错误，每个坏请求白打
-// (1+Retry) 次真实 HTTP。
+// 1xx/3xx/4xx 是确定性响应/请求错误，重试必然同样失败（#140：3xx 与
+// 4xx 同侧——重定向不重试）；本地确定性错误（序列化/解码/选点，#123）
+// 重试同一输入恒失败，同样不可重试——此前它们无 statusError 被判为
+// 可重试网络错误，每个坏请求白打 (1+Retry) 次真实 HTTP。
 func retryable(err error) bool {
 	if localFault(err) {
 		return false

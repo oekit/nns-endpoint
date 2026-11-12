@@ -179,7 +179,7 @@ func (f *HTTPEndpointFactory) MakeEndpoint(serviceName string) (Endpoint, error)
 						f.metrics.ObserveRetry(serviceName, httpMetricsKind)
 					}
 					epLog.Debug("http endpoint retry on next instance",
-						"service", serviceName, "attempt", attempt+1, "err", attemptErr)
+						"service", serviceName, "attempt", attempt+1, logx.ErrKey, attemptErr)
 				}
 			}
 			return nil, lastErr
@@ -281,7 +281,8 @@ func (f *HTTPEndpointFactory) doRequest(ctx context.Context, addr string, req HT
 	if code < 200 || code >= 300 {
 		msg := string(hResp.Body())
 		msg = msg[:min(len(msg), 500)]
-		// statusError 携带状态码：4xx 不计熔断失败、不重试，5xx 反之
+		// statusError 携带状态码：1xx/3xx/4xx 不计熔断失败、不惩罚节点、
+		// 不重试（#140，与 httpx 的 >=500 失败判定同口径），5xx 反之
 		return nil, &statusError{code: code, err: fmt.Errorf("http error: %d %s", code, msg)}
 	}
 

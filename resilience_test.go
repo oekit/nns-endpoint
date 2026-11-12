@@ -410,3 +410,67 @@ func TestHTTPEndpoint_ClientErrorNotChargedToNode(t *testing.T) {
 		t.Fatalf("5xx done sample must carry the status error, got: %v", errs[1])
 	}
 }
+
+// TestHTTPEndpoint_RedirectDoesNotTripBreaker 是 #140 的端到端回归测试：
+// HTTP 3xx（恒返回 302 的健康服务）不计熔断失败、不惩罚节点——与
+// httpx.WithCircuitBreaker 的 >=500 失败判定同口径。
+//
+// 缺陷成因（#140）：statusError 把 3xx 包进错误链后，callerFault 的
+// `code >= 400 && code < 500` 判 false ⇒ 3xx 不是调用方错误 ⇒ 熔断计失败、
+// 节点被 EWMA 惩罚——恒 302 的健康服务第 6 次调用（默认
+// ReadyToTrip: ConsecutiveFailures > 5）即被熔断，熔断窗口内所有调用方
+// 拿 ErrCircuitOpen、后端不再被打到。变异性负对照：还原 callerFault 的
+// 4xx 窄区间判定后，本测试第 6 次调用转红。
+func TestHTTPEndpoint_RedirectDoesNotTripBreaker(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Location", "/moved")
+		w.WriteHeader(http.StatusFound) // 恒 302：健康服务，只是重定向
+	}))
+	t.Cleanup(srv.Close)
+	host, port := parseHostPort(srv.URL)
+
+	rec := &recordingSelector{}
+	c := nnsclient.New(
+		nnsclient.WithMockMode(true),
+		nnsclient.WithStaticInstances("svc-a", []registry.Instance{{IP: host, Port: port}}),
+		// Retry=0：每调用恰好 1 个 done 样本，断言不被重试摊薄
+		nnsclient.WithLocalServiceConfig("svc-a", localServiceConfig(0)),
+	)
+	if err := c.LoadDepService(context.Background(), []string{"svc-a"}); err != nil {
+		t.Fatalf("LoadDepService: %v", err)
+	}
+	factory := NewHTTPEndpointFactory(c, WithSelector(rec))
+	defer factory.Close()
+
+	ep, err := factory.MakeEndpoint("svc-a")
+	if err != nil {
+		t.Fatalf("MakeEndpoint: %v", err)
+	}
+
+	// 恒 302 连打 10 次（修复前第 6 次即 ErrCircuitOpen）：3xx 对调用方
+	// 仍是错误响应（不跟随重定向），但绝不得是熔断拒绝
+	for i := 0; i < 10; i++ {
+		_, callErr := ep(context.Background(), HTTPRequest{Method: http.MethodGet, Path: "/x"})
+		if callErr == nil {
+			t.Fatalf("call #%d: 3xx must stay an error response for the caller", i+1)
+		}
+		if errors.Is(callErr, ErrCircuitOpen) {
+			t.Fatalf("call #%d: circuit opened on a healthy 302 service (#140 regression)", i+1)
+		}
+	}
+
+	if state := factory.breakers.getOrCreate("svc-a").State(); state != gobreaker.StateClosed {
+		t.Fatalf("breaker state = %v, want closed (3xx must not count as breaker failure)", state)
+	}
+
+	// 节点不得被记故障惩罚：3xx 的 done 回写归一为 nil（与 4xx 同口径）
+	errs := rec.doneErrs()
+	if len(errs) != 10 {
+		t.Fatalf("expected exactly 10 done samples, got %d", len(errs))
+	}
+	for i, e := range errs {
+		if e != nil {
+			t.Fatalf("done sample #%d must not charge the node for 3xx, got %v", i+1, e)
+		}
+	}
+}

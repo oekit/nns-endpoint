@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/oekit/logx"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/connectivity"
 )
@@ -146,7 +147,7 @@ func (p *GRPCPool) get(ctx context.Context, addr string, ref bool, opts ...grpc.
 			if cur, exists := p.conns[addr]; exists && cur == entry &&
 				time.Since(cur.lastUsed) > p.idleTTL && cur.inFlight == 0 {
 				if err := cur.conn.Close(); err != nil {
-					epLog.Warn("grpc conn close failed on evict", "addr", addr, "err", err)
+					epLog.Warn("grpc conn close failed on evict", "addr", addr, logx.ErrKey, err)
 				}
 				delete(p.conns, addr)
 			}
@@ -199,7 +200,7 @@ func (p *GRPCPool) create(_ context.Context, addr string, ref bool, opts ...grpc
 
 	if ok {
 		if err := entry.conn.Close(); err != nil {
-			epLog.Warn("grpc conn close failed on replace", "addr", addr, "err", err)
+			epLog.Warn("grpc conn close failed on replace", "addr", addr, logx.ErrKey, err)
 		}
 		delete(p.conns, addr)
 	} else if len(p.conns) >= p.maxSize {
@@ -235,7 +236,7 @@ func (p *GRPCPool) evictIdleLocked() {
 	for addr, entry := range p.conns {
 		if now.Sub(entry.lastUsed) > p.idleTTL && entry.inFlight == 0 {
 			if err := entry.conn.Close(); err != nil {
-				epLog.Warn("grpc conn close failed on evict", "addr", addr, "err", err)
+				epLog.Warn("grpc conn close failed on evict", "addr", addr, logx.ErrKey, err)
 			}
 			delete(p.conns, addr)
 		}
@@ -251,7 +252,7 @@ func (p *GRPCPool) Close() {
 
 	for addr, entry := range p.conns {
 		if err := entry.conn.Close(); err != nil {
-			epLog.Warn("grpc conn close failed on pool close", "addr", addr, "err", err)
+			epLog.Warn("grpc conn close failed on pool close", "addr", addr, logx.ErrKey, err)
 		}
 	}
 	p.conns = make(map[string]*connEntry)

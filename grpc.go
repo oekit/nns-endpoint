@@ -2,7 +2,9 @@ package endpoint
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"sync/atomic"
 	"time"
 
 	nnsclient "github.com/oekit/nns/client"
@@ -14,6 +16,13 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/protobuf/proto"
 )
+
+// ErrFactoryClosed 表示端点工厂已 Close（终结操作）后仍调用其端点（#148）。
+// errors.Is 可判定；Close 后存量端点闭包一律短路返回本哨兵（包装为
+// localError——本地确定性错误，不计熔断样本、不做节点 EWMA 惩罚），
+// 不再触达底层连接池。优雅停机窗口在途请求、双路关停竞态下未同步的
+// 消费方都拿到明确错误，而不是静默复活池里的连接。
+var ErrFactoryClosed = errors.New("nns-endpoint: endpoint factory closed")
 
 // GRPCRequest gRPC 端点请求参数。
 type GRPCRequest struct {
@@ -54,6 +63,11 @@ type GRPCEndpointFactory struct {
 	// 工厂（selectorCache/breakers/pool 无法回收），配置事件继续打在
 	// 死工厂上。
 	configChangeHandle *nnsclient.ConfigChangeHandle
+	// closed 是工厂的终态登记（#148）：Close 置位后，存量端点闭包
+	// 短路返回 ErrFactoryClosed——优雅停机窗口的在途端点调用拿到明确
+	// 错误，而不是触达已终结的连接池（或静默复活连接）。atomic：端点
+	// 闭包读不持工厂锁，与 Close 无同一把锁的 happens-before。
+	closed atomic.Bool
 }
 
 // grpcMetricsKind 是本工厂在弹性指标里的 kind 标签值。
@@ -97,6 +111,14 @@ func (f *GRPCEndpointFactory) ResetSelector(serviceName string) {
 // 调用会得到 grpc 的 "no transport security set" 错误（此前是静默明文）。
 func (f *GRPCEndpointFactory) MakeEndpoint(serviceName string, opts ...grpc.DialOption) (Endpoint, error) {
 	return func(ctx context.Context, request any) (any, error) {
+		// #148：工厂 Close 后端点闭包短路报错——存量端点在优雅停机窗口
+		// 被路由注册表/调用方再次调用是常态场景，必须显式拒绝而不是触达
+		// 已终结的连接池。本地确定性错误（localError）：不计熔断样本、
+		// 不做节点 EWMA 惩罚、不换实例重试。
+		if f.closed.Load() {
+			return nil, localErrorf("%w (service=%s)", ErrFactoryClosed, serviceName)
+		}
+
 		req, ok := request.(GRPCRequest)
 		if !ok {
 			return nil, fmt.Errorf("invalid request type, expected GRPCRequest")
@@ -203,11 +225,13 @@ func (f *GRPCEndpointFactory) MakeEndpoint(serviceName string, opts ...grpc.Dial
 	}, nil
 }
 
-// Close 关闭 gRPC 端点工厂持有的资源：先注销构造期在 client 上注册的
+// Close 关闭 gRPC 端点工厂持有的资源：先登记终态（此后存量端点闭包
+// 短路返回 ErrFactoryClosed，#148），再注销构造期在 client 上注册的
 // 配置变更回调（#135，不注销则 client 经回调闭包长持已废弃工厂、配置
-// 事件继续打在死工厂上），再关闭连接池。OffConfigChange 与 pool.Close
+// 事件继续打在死工厂上），最后关闭连接池。OffConfigChange 与 pool.Close
 // 均幂等，Close 可安全重复调用。
 func (f *GRPCEndpointFactory) Close() {
+	f.closed.Store(true)
 	f.client.OffConfigChange(f.configChangeHandle)
 	f.configChangeHandle = nil
 	f.pool.Close()

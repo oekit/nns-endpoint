@@ -2,14 +2,22 @@ package endpoint
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/oekit/logx"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/connectivity"
 )
+
+// ErrPoolClosed 表示连接池已 Close（终结操作）后再取连接（#148）。
+// errors.Is 可判定；Close 后 Get/Acquire 一律返回本哨兵，不再静默新建
+// 连接——新建连接进入已终结的池后无人再调 pool.Close，连接及其 gRPC
+// channel/子连接只能泄漏到进程退出。
+var ErrPoolClosed = errors.New("nns-endpoint: grpc pool closed")
 
 // defaultMaxPoolSize 是连接池默认最大连接数。
 const defaultMaxPoolSize = 128
@@ -40,6 +48,12 @@ type connEntry struct {
 // 调用）；长生命周期流式 RPC 必须用 Acquire/Release 配对——在途期间
 // 连接不会被任何驱逐路径关闭。
 //
+// 实例一次性（#148）：Close 是终结操作，Close 后 Get/Acquire 一律返回
+// ErrPoolClosed——不静默重建连接（否则新建连接进入已终结的池，此后无人
+// 再 Close ⇒ 连接与 gRPC channel/子连接泄漏）。对齐矩阵 #124 以来
+// 「停机后调用显式报错，不静默哑火」的纪律（timertask 同场景返回
+// ErrBackendStopped）。
+//
 // 传输凭据（#77）：池**不注入**默认凭据——调用方必须经 opts 显式传入
 // grpc.WithTransportCredentials(insecure.NewCredentials())（明文）或 TLS
 // 凭据。缺凭据时 grpc.NewClient 返回 "no transport security set" 错误
@@ -49,6 +63,9 @@ type GRPCPool struct {
 	conns   map[string]*connEntry
 	maxSize int
 	idleTTL time.Duration
+	// closed 是池的终态登记（#148）：Close 置位后 Get/Acquire 拒绝新建。
+	// atomic——Get 的快速路径不持写锁，与 Close 无同一把锁的 happens-before。
+	closed atomic.Bool
 }
 
 // NewGRPCPool 创建一个新的 gRPC 连接池实例。
@@ -76,6 +93,7 @@ func NewGRPCPool(maxSize ...int) *GRPCPool {
 // Get 从连接池获取指定地址的 gRPC 连接，不存在、已关闭或空闲超时时创建新连接。
 // opts 透传给 grpc.NewClient；必须包含传输凭据（明文 insecure / TLS），
 // 缺凭据时返回 grpc 的 no transport security set 错误（#77）。
+// 池 Close 后调用返回 ErrPoolClosed（#148，终结语义：不静默重建连接）。
 //
 // Get 是**无引用借出**：不记在途引用，适合调用时长远小于 idleTTL 的
 // 一元调用（端点工厂内部即此形态，超时上限有界）。调用时长可能超过
@@ -95,6 +113,7 @@ func (p *GRPCPool) Get(ctx context.Context, addr string, opts ...grpc.DialOption
 // 空闲驱逐路径关闭——lastUsed 的「借出时刻」口径覆盖不了「借出后仍在
 // 用」的长生命周期流式 RPC。调用方用毕必须 Release(addr, conn) 配对归还；
 // 未归还的连接永不被空闲驱逐（至多被 Shutdown 替换或池 Close 终结）。
+// 池 Close 后调用返回 ErrPoolClosed（#148，终结语义：不静默重建连接）。
 func (p *GRPCPool) Acquire(ctx context.Context, addr string, opts ...grpc.DialOption) (*grpc.ClientConn, error) {
 	return p.get(ctx, addr, true, opts...)
 }
@@ -121,6 +140,10 @@ func (p *GRPCPool) Release(addr string, conn *grpc.ClientConn) {
 
 // get 是 Get/Acquire 的公共实现；ref=true 时借出记在途引用。
 func (p *GRPCPool) get(ctx context.Context, addr string, ref bool, opts ...grpc.DialOption) (*grpc.ClientConn, error) {
+	// #148：Close 后 Get/Acquire 显式报错，不静默重建（池的终态闸）。
+	if p.closed.Load() {
+		return nil, ErrPoolClosed
+	}
 	for {
 		p.mu.RLock()
 		entry, ok := p.conns[addr]
@@ -189,6 +212,12 @@ func (p *GRPCPool) create(_ context.Context, addr string, ref bool, opts ...grpc
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
+	// #148：get 入口检查与 create 持锁之间 Close 可能已落地——持锁后复核
+	// 终态，绝不把新建连接写回已终结的池。
+	if p.closed.Load() {
+		return nil, ErrPoolClosed
+	}
+
 	entry, ok := p.conns[addr]
 	if ok && entry.conn.GetState() != connectivity.Shutdown {
 		entry.lastUsed = time.Now()
@@ -245,10 +274,15 @@ func (p *GRPCPool) evictIdleLocked() {
 
 // Close 关闭连接池中的所有 gRPC 连接。
 // Close 是终结操作：有在途引用的连接同样关闭（其上活跃 RPC 会终止），
-// 与「显式关停」语义一致。
+// 与「显式关停」语义一致。Close 后 Get/Acquire 一律返回 ErrPoolClosed
+// （#148）——不静默重建连接，存量端点在工厂 Close 后的调用同样被闸拒绝。
 func (p *GRPCPool) Close() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+
+	// #148：先登记终态再关连接——检查与关闭在同一临界区内完成，此后
+	// Get/Acquire 走终态闸返回 ErrPoolClosed，不再静默新建。
+	p.closed.Store(true)
 
 	for addr, entry := range p.conns {
 		if err := entry.conn.Close(); err != nil {

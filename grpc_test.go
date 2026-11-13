@@ -97,8 +97,10 @@ func TestGRPCPool_Get_RespectsExtraOptions(t *testing.T) {
 	_ = called
 }
 
-// TestGRPCPool_Close_ClearsAllConnections verifies that after Close,
-// subsequent Get returns a NEW connection (not the cached one).
+// TestGRPCPool_Close_ClearsAllConnections verifies that after Close all
+// cached conns are Shutdown, and subsequent Get returns ErrPoolClosed
+// instead of silently rebuilding a connection (#148：Close 是终结操作，
+// 行为由「复活池」改为「终态闸」）。
 func TestGRPCPool_Close_ClearsAllConnections(t *testing.T) {
 	pool := NewGRPCPool()
 
@@ -115,15 +117,11 @@ func TestGRPCPool_Close_ClearsAllConnections(t *testing.T) {
 		t.Errorf("expected Shutdown state after Close, got %v", state)
 	}
 
-	// A new Get for the same address must succeed and return a new conn
-	// (not the closed one).
-	conn2, err := pool.Get(context.Background(), "127.0.0.1:0", withTestInsecureCreds())
-	if err != nil {
-		t.Fatalf("Get after close: %v", err)
-	}
-	defer conn2.Close()
-	if conn1 == conn2 {
-		t.Fatal("expected new conn after Close, got cached one")
+	// #148：Close 后 Get 不再新建连接（旧实现返回新 conn——新建连接进入
+	// 已终结的池 ⇒ 无人再 Close ⇒ 连接/channel 泄漏），显式报错。
+	_, err = pool.Get(context.Background(), "127.0.0.1:0", withTestInsecureCreds())
+	if !errors.Is(err, ErrPoolClosed) {
+		t.Fatalf("#148 回归：Get after close = %v, want ErrPoolClosed", err)
 	}
 }
 
@@ -220,7 +218,9 @@ func TestGRPCEndpoint_ResetSelector(t *testing.T) {
 	}
 }
 
-// TestGRPCEndpoint_Close verifies Close calls pool.Close.
+// TestGRPCEndpoint_Close verifies Close registers the terminal state and
+// closes the pool: after factory.Close, pool.Get returns ErrPoolClosed
+// instead of rebuilding a connection（#148：终态闸，不再复活池）.
 func TestGRPCEndpoint_Close(t *testing.T) {
 	c := newTestServiceClient(t)
 	factory := NewGRPCEndpointFactory(c)
@@ -231,16 +231,10 @@ func TestGRPCEndpoint_Close(t *testing.T) {
 	}
 	defer conn.Close()
 	factory.Close()
-	// After Close, the pool's internal map should be empty.
-	// We can't directly inspect the map (unexported), but a new Get
-	// must return a new conn.
-	conn2, err := factory.pool.Get(context.Background(), "127.0.0.1:0", withTestInsecureCreds())
-	if err != nil {
-		t.Fatalf("pool.Get after Close: %v", err)
-	}
-	defer conn2.Close()
-	if conn == conn2 {
-		t.Fatal("expected new conn after factory.Close, got cached one")
+	// #148：工厂 Close 后池登记终态——再 Get 显式报错，不静默新建。
+	_, err = factory.pool.Get(context.Background(), "127.0.0.1:0", withTestInsecureCreds())
+	if !errors.Is(err, ErrPoolClosed) {
+		t.Fatalf("#148 回归：pool.Get after Close = %v, want ErrPoolClosed", err)
 	}
 }
 

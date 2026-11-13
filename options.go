@@ -134,7 +134,7 @@ func newBreakerTemplate(kind string, cfg *factoryConfig) breakerTemplate {
 		userOnStateChange := tmpl.OnStateChange
 		if metrics != nil {
 			// 新建熔断器初始态必为 closed；显式置 0 让 gauge series 从创建即存在
-			metrics.ObserveBreakerState(serviceName, kind, resilience.StateClosed)
+			metrics.ObserveBreakerStateTyped(serviceName, kind, resilience.CircuitStateClosed)
 		}
 		// 状态迁移始终留痕（logx 结构化），与 httpx.WithCircuitBreaker 的默认行为对齐
 		s.OnStateChange = func(name string, from, to gobreaker.State) {

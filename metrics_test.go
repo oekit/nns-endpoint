@@ -101,7 +101,7 @@ func TestHTTPEndpoint_MetricsRetryAndRejected(t *testing.T) {
 		t.Fatalf("expected 2 retry observations, got %v", got)
 	}
 	// closed → open 迁移一次，gauge=2
-	if got := metricValue(t, reg, "nns_endpoint_breaker_state", map[string]string{"service": "svc-a", "kind": "nns-http"}); got != resilience.StateOpen {
+	if got := metricValue(t, reg, "nns_endpoint_breaker_state", map[string]string{"service": "svc-a", "kind": "nns-http"}); got != float64(resilience.CircuitStateOpen) {
 		t.Fatalf("expected open state gauge, got %v", got)
 	}
 	if got := metricValue(t, reg, "nns_endpoint_breaker_transitions_total",

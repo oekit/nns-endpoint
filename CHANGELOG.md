@@ -2,6 +2,10 @@
 
 由 ekit v0.34.0（git.enjoye.top/enjoydream/ekit，冻结维护）拆分而来。所有 notable 变更记录如下。
 
+## [v0.4.0] — 2026-11-13
+
+- **BREAKING**：依赖地板抬 metrics v0.4.0 / pkg v0.48.0 / httpx v0.12.0（三者兼容层均已删）。本仓迁移：熔断 seed gauge ObserveBreakerState(…, StateClosed) → ObserveBreakerStateTyped(…, CircuitStateClosed)（OnStateChange 路径此前已是 Typed 形态）。下游直接消费 metrics 历史入口或 pkg errors.Errorf 的需随地板同迁。
+
 ## [v0.3.6] — 2026-11-13
 
 - fix(endpoint): GRPCPool/工厂 Close 终态闸——Close 后 Get/Acquire 显式报错不再静默重建连接（#148）。此前 Close 只清理现存连接、不登记终态：Close 后的 Get/Acquire 走 create() 照常 grpc.NewClient 写回池——池在「终结」后照常复活，新建连接此后无人再 Close ⇒ 连接与 gRPC channel/子连接泄漏（停机尾流量下无上界循环）。工厂侧 MakeEndpoint 返回的端点闭包捕获工厂直接 f.pool.Acquire，GRPCEndpointFactory.Close 后端点本身不失效。修法（对齐矩阵「实例一次性：停机后调用显式报错」纪律，timertask ErrBackendStopped 同口径）：GRPCPool 加 closed 终态（atomic），get() 入口与 create() 持锁后双重检查返回 ErrPoolClosed 哨兵（errors.Is 可判定）；GRPCEndpointFactory 加 closed 终态，Close 后存量端点闭包首段短路返回 ErrFactoryClosed（localError 归类：不计熔断样本、不做节点 EWMA 惩罚）。泄漏回归：Close 后 N 次 Acquire 连接数不涨（旧实现复活池已实测复现）、Close/Acquire 并发形态钉（-race）。

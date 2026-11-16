@@ -3,7 +3,6 @@ package endpoint
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"net/url"
 	"strings"
 	"time"
@@ -11,6 +10,7 @@ import (
 	nnsclient "github.com/oekit/nns/client"
 
 	"github.com/oekit/metrics/resilience"
+	pkgerrors "github.com/oekit/pkg/errors"
 
 	"github.com/cloudwego/hertz/pkg/protocol"
 	"github.com/oekit/httpx"
@@ -127,7 +127,7 @@ func (f *HTTPEndpointFactory) MakeEndpoint(serviceName string) (Endpoint, error)
 	return func(ctx context.Context, request any) (any, error) {
 		req, ok := request.(HTTPRequest)
 		if !ok {
-			return nil, fmt.Errorf("invalid request type, expected HTTPRequest")
+			return nil, pkgerrors.New("invalid request type, expected HTTPRequest")
 		}
 
 		basic := f.client.GetServiceBasic(serviceName)
@@ -148,7 +148,7 @@ func (f *HTTPEndpointFactory) MakeEndpoint(serviceName string) (Endpoint, error)
 		// （发现/选点在熔断外，grpc.go）对齐。
 		instances, err := f.client.GetInstances(ctx, serviceName)
 		if err != nil {
-			return nil, fmt.Errorf("get instances: %w", err)
+			return nil, pkgerrors.Wrapf(err, "get instances")
 		}
 		if len(instances) == 0 {
 			return nil, registry.ErrNoInstances
@@ -274,7 +274,7 @@ func (f *HTTPEndpointFactory) doRequest(ctx context.Context, addr string, req HT
 	}
 
 	if err := f.http.Hertz().DoDeadline(cancelCtx, hReq, hResp, time.Now().Add(timeout)); err != nil {
-		return nil, fmt.Errorf("http request: %w", err)
+		return nil, pkgerrors.Wrapf(err, "http request")
 	}
 
 	code := hResp.StatusCode()
@@ -283,7 +283,7 @@ func (f *HTTPEndpointFactory) doRequest(ctx context.Context, addr string, req HT
 		msg = msg[:min(len(msg), 500)]
 		// statusError 携带状态码：1xx/3xx/4xx 不计熔断失败、不惩罚节点、
 		// 不重试（#140，与 httpx 的 >=500 失败判定同口径），5xx 反之
-		return nil, &statusError{code: code, err: fmt.Errorf("http error: %d %s", code, msg)}
+		return nil, &statusError{code: code, err: pkgerrors.Newf("http error: %d %s", code, msg)}
 	}
 
 	if req.Result != nil {

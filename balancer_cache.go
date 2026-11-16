@@ -3,11 +3,11 @@ package endpoint
 import (
 	"context"
 	"errors"
-	"fmt"
 	"sync"
 
 	"github.com/oekit/httpx/loadbalance"
 	nnsclient "github.com/oekit/nns/client"
+	pkgerrors "github.com/oekit/pkg/errors"
 	"golang.org/x/sync/singleflight"
 )
 
@@ -92,7 +92,7 @@ func (c *selectorCache) buildSelector(ctx context.Context, serviceName string) (
 	if err != nil && !errors.Is(err, nnsclient.ErrConfigStoreUnavailable) {
 		// 配置拉取失败/JSON 损坏：不写缓存，本次调用显式失败，
 		// 下次调用重试首建（配置恢复后 p2c 等策略即正常生效）
-		return nil, fmt.Errorf("get service config: %w", err)
+		return nil, pkgerrors.Wrapf(err, "get service config")
 	}
 	created, err := loadbalance.NewSelector(loadbalance.NormalizeSelectorName(basic.Lb))
 	if err != nil {

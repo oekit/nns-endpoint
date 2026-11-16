@@ -10,6 +10,7 @@ import (
 	nnsclient "github.com/oekit/nns/client"
 
 	"github.com/oekit/metrics/resilience"
+	pkgerrors "github.com/oekit/pkg/errors"
 
 	"github.com/oekit/httpx/loadbalance"
 	"github.com/oekit/registry"
@@ -121,7 +122,7 @@ func (f *GRPCEndpointFactory) MakeEndpoint(serviceName string, opts ...grpc.Dial
 
 		req, ok := request.(GRPCRequest)
 		if !ok {
-			return nil, fmt.Errorf("invalid request type, expected GRPCRequest")
+			return nil, pkgerrors.New("invalid request type, expected GRPCRequest")
 		}
 
 		// #71/#73：默认 proto codec 只接受 proto.Message。请求/响应的
@@ -129,15 +130,15 @@ func (f *GRPCEndpointFactory) MakeEndpoint(serviceName string, opts ...grpc.Dial
 		// 直接报配置性错误，而不是把裸 *any 塞给 Invoke 在 codec 深处
 		// 报晦涩的编解码错误（响应此前永远拿不到）。
 		if req.Reply == nil {
-			return nil, fmt.Errorf("GRPCRequest.Reply must be a non-nil proto.Message pointer (e.g. &helloworld.HelloReply{}) to receive the response")
+			return nil, pkgerrors.New("GRPCRequest.Reply must be a non-nil proto.Message pointer (e.g. &helloworld.HelloReply{}) to receive the response")
 		}
 		if _, ok := req.Request.(proto.Message); !ok {
-			return nil, fmt.Errorf("invalid request type %T: gRPC request must implement proto.Message", req.Request)
+			return nil, pkgerrors.Newf("invalid request type %T: gRPC request must implement proto.Message", req.Request)
 		}
 
 		instances, err := f.client.GetInstances(ctx, serviceName)
 		if err != nil {
-			return nil, fmt.Errorf("get instances: %w", err)
+			return nil, pkgerrors.Wrapf(err, "get instances")
 		}
 
 		if len(instances) == 0 {
@@ -167,7 +168,7 @@ func (f *GRPCEndpointFactory) MakeEndpoint(serviceName string, opts ...grpc.Dial
 		conn, err := f.pool.Acquire(ctx, n.Address(), opts...)
 		if err != nil {
 			done(ctx, loadbalance.DoneInfo{Err: err})
-			return nil, fmt.Errorf("get grpc conn: %w", err)
+			return nil, pkgerrors.Wrapf(err, "get grpc conn")
 		}
 		// #99：借出记在途引用，调用结束归还——空闲驱逐不会关闭有在途
 		// 引用的连接。直接使用池的长生命周期流式调用方同样经

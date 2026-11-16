@@ -3,12 +3,12 @@ package endpoint
 import (
 	"context"
 	"errors"
-	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/oekit/logx"
+	pkgerrors "github.com/oekit/pkg/errors"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/connectivity"
 )
@@ -238,7 +238,7 @@ func (p *GRPCPool) create(_ context.Context, addr string, ref bool, opts ...grpc
 		// 池被陈旧连接占满时新地址一律 max size reached，扩容实例直接被拒。
 		p.evictIdleLocked()
 		if len(p.conns) >= p.maxSize {
-			return nil, fmt.Errorf("grpc pool: max size %d reached, cannot create new connection to %s", p.maxSize, addr)
+			return nil, pkgerrors.Newf("grpc pool: max size %d reached, cannot create new connection to %s", p.maxSize, addr)
 		}
 	}
 
@@ -246,7 +246,7 @@ func (p *GRPCPool) create(_ context.Context, addr string, ref bool, opts ...grpc
 	if err != nil {
 		// 典型触发是未显式传传输凭据（#77）：grpc 的 errNoTransportSecurity
 		// 已自带修复指引（显式 WithTransportCredentials），这里补地址上下文。
-		return nil, fmt.Errorf("grpc pool: create conn to %s: %w", addr, err)
+		return nil, pkgerrors.Wrapf(err, "grpc pool: create conn to %s", addr)
 	}
 
 	entry = &connEntry{conn: conn, lastUsed: time.Now()}

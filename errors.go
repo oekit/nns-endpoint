@@ -6,6 +6,7 @@ import (
 
 	"github.com/oekit/httpx"
 	"github.com/oekit/metrics/resilience"
+	pkgerrors "github.com/oekit/pkg/errors"
 	"github.com/sony/gobreaker"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -33,7 +34,7 @@ func rejectIfCircuitOpen(err error, service, kind string, m *resilience.Metrics)
 	if m != nil {
 		m.ObserveRejected(service, kind)
 	}
-	return fmt.Errorf("%w: service=%s", ErrCircuitOpen, service)
+	return pkgerrors.Wrap(ErrCircuitOpen, "circuit open", "service", service)
 }
 
 // statusError 携带 HTTP 状态码的响应错误，供熔断/重试按状态码分类。

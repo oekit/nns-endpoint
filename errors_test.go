@@ -5,13 +5,14 @@ import (
 	"fmt"
 	"testing"
 
+	pkgerrors "github.com/oekit/pkg/errors"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
 
 // statusErrOf 构造携带指定状态码的 statusError（测试表驱动用）。
 func statusErrOf(code int) error {
-	return &statusError{code: code, err: fmt.Errorf("http error: %d", code)}
+	return &statusError{code: code, err: pkgerrors.Newf("http error: %d", code)}
 }
 
 // TestCallerFault_Classification 钉住错误归属分类面（#123/#124/#140）：

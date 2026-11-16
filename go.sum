@@ -161,8 +161,8 @@ github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822/go.mod h1:+n7T8m
 github.com/nacos-group/nacos-sdk-go/v2 v2.3.6 h1:yJFBWOKbNntdO+a703QShiqAefOFSY6myq+cbAbavFg=
 github.com/nacos-group/nacos-sdk-go/v2 v2.3.6/go.mod h1:ygUBdt7eGeYBt6Lz2HO3wx7crKXk25Mp80568emGMWU=
 github.com/niemeyer/pretty v0.0.0-20200227124842-a10e7caefd8e/go.mod h1:zD1mROLANZcx1PVRCS0qkT7pwLkGfwJo4zjcN/Tysno=
-github.com/oekit/concurrency v0.37.0 h1:u5ZfRSdXuRxM4NJhsShOtSFSPK0WTqphmhdXahMgnd4=
-github.com/oekit/concurrency v0.37.0/go.mod h1:9TJXufRRJMu5JvcqaavJLqq18vnwIeLgj5mAF64y46w=
+github.com/oekit/concurrency v0.38.0 h1:wTd4v2flxlXSd3Y/FB0O5MFvNxCtDfXpTr6nlOLsmpU=
+github.com/oekit/concurrency v0.38.0/go.mod h1:2yrWmvB64qp1+6dQ70xc/HSJPhs1nCr7LU7t1BBXtL4=
 github.com/oekit/core v0.15.3 h1:3fARA1p797gCqsMf+lFqudLezX+KrEPngv7qYxgipQQ=
 github.com/oekit/core v0.15.3/go.mod h1:V8QhwANL928QtoZE6GeNsQ76DEqx8qkTxFqIz5oLvlM=
 github.com/oekit/httpx v0.12.1 h1:i7M0XyoQLsYZ9tXI8SuX88Tjo1k+iqd4Njvz37lfL3U=

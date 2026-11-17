@@ -5,10 +5,10 @@ import (
 	"errors"
 	"sync"
 
+	"github.com/oekit/concurrency/singleflight"
 	"github.com/oekit/httpx/loadbalance"
 	nnsclient "github.com/oekit/nns/client"
 	pkgerrors "github.com/oekit/pkg/errors"
-	"golang.org/x/sync/singleflight"
 )
 
 // selectorCache 管理服务名到节点选择器的映射（v0.2.0 起替代 balancerCache）。
@@ -24,7 +24,12 @@ type selectorCache struct {
 	// 首建只执行一次配置拉取 + selector 构造，其余等待方共享结果——
 	// 此前 N 个并发首调各拉一次配置、各建一个 selector，仅靠写锁
 	// double-check 留下最后一个，其余白白丢弃。
-	firstBuild singleflight.Group
+	// #204：golang.org/x/sync/singleflight 迁移到矩阵单源
+	// concurrency/singleflight.Flight——ctx 显式透传（fn 收到的 ctx 即
+	// 调用方请求 ctx，慢路径跟随请求超时与取消；等待方自己的 ctx 先
+	// 取消时仅该等待方退出，不影响 leader），与 getOrCreate 的
+	// 「慢路径必须跟随请求超时」契约（下述 godoc）配套。
+	firstBuild singleflight.Flight[loadbalance.Selector]
 }
 
 func newSelectorCache(client *nnsclient.ServiceClient, injected loadbalance.Selector) *selectorCache {
@@ -73,7 +78,9 @@ func (c *selectorCache) getOrCreate(ctx context.Context, serviceName string) (lo
 	// 慢路径：singleflight 合并并发首建，锁外执行 IO。缓存写入在 flight
 	// 内完成（fn 返回前缓存已就位）：flight key 删除后到达的调用必然走
 	// 快路径命中，不存在「flight 已结、缓存未写」的再执行窗口。
-	v, err, _ := c.firstBuild.Do(serviceName, func() (any, error) {
+	// #204：Flight 泛型形态免类型断言；ctx 显式透传给 fn（leader 以
+	// 首个调用方的请求 ctx 执行配置拉取）。
+	v, err := c.firstBuild.Do(ctx, serviceName, func(ctx context.Context) (loadbalance.Selector, error) {
 		created, err := c.buildSelector(ctx, serviceName)
 		if err != nil {
 			return nil, err
@@ -83,7 +90,7 @@ func (c *selectorCache) getOrCreate(ctx context.Context, serviceName string) (lo
 	if err != nil {
 		return nil, err
 	}
-	return v.(loadbalance.Selector), nil
+	return v, nil
 }
 
 // buildSelector 拉取服务配置并构造节点选择器（锁外 IO，#98 错误面语义）。

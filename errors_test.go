@@ -1,6 +1,7 @@
 package endpoint
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"testing"
@@ -69,18 +70,25 @@ func TestCallerFault_Classification(t *testing.T) {
 	}
 }
 
-// TestRetryable_Classification 钉住重试口径（#123）：本地确定性错误
-// 不可重试，5xx/网络错误可重试，4xx 不可重试。
+// TestRetryable_Classification 钉住重试口径（#123/#203）：本地确定性错误
+// 不可重试；429/5xx/网络错误可重试（#203 行为变更：429 此前与 4xx 同侧
+// 不重试，自 #203 起判定单源 concurrency/retry/httpx.Retryable，与 httpx
+// defaultRetryIf 的限流口径对齐）；其余 4xx 不可重试；ctx 取消/超时是
+// 调用方主动放弃，不可重试（#203：此前被判可重试，紧循环白烧预算）。
 func TestRetryable_Classification(t *testing.T) {
 	tests := []struct {
 		name      string
 		err       error
 		retryable bool
 	}{
+		{"http 429", statusErrOf(429), true}, // #203 行为变更：429 恢复为可重试（与 httpx 同口径）
 		{"http 500", statusErrOf(500), true},
 		{"network error", errors.New("dial tcp: i/o timeout"), true},
 		{"http 302", statusErrOf(302), false}, // #140：3xx 与 4xx 同侧，确定性响应不重试
 		{"http 400", statusErrOf(400), false},
+		{"ctx canceled", context.Canceled, false},
+		{"ctx deadline exceeded", context.DeadlineExceeded, false},
+		{"wrapped ctx cancel", fmt.Errorf("http request: %w", context.Canceled), false},
 		{"local marshal", localErrorf("marshal body: %w", errors.New("unsupported type")), false},
 		{"local unmarshal", localErrorf("unmarshal response: %w", errors.New("invalid character")), false},
 	}

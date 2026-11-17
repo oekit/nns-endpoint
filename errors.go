@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 
+	retryhttpx "github.com/oekit/concurrency/retry/httpx"
 	"github.com/oekit/httpx"
 	"github.com/oekit/metrics/resilience"
 	pkgerrors "github.com/oekit/pkg/errors"
@@ -154,17 +155,25 @@ func breakerSuccessful(err error) bool {
 
 // retryable 判定错误是否值得换实例重试。
 //
-// 5xx 与网络错误可重试（对端故障或瞬态网络问题，换节点有意义）；
-// 1xx/3xx/4xx 是确定性响应/请求错误，重试必然同样失败（#140：3xx 与
-// 4xx 同侧——重定向不重试）；本地确定性错误（序列化/解码/选点，#123）
-// 重试同一输入恒失败，同样不可重试——此前它们无 statusError 被判为
-// 可重试网络错误，每个坏请求白打 (1+Retry) 次真实 HTTP。
+// 判定走矩阵单源（#203，与 httpx defaultRetryIf 同口径——godoc 宣称的
+// 「与 httpx 同口径」自此由同一判定实现背书，不再两处漂移）：
+//   - 本地确定性错误（序列化/解码/选点，#123）：重试同一输入恒失败，
+//     不可重试——此前它们无 statusError 被判为可重试网络错误，每个坏
+//     请求白打 (1+Retry) 次真实 HTTP；
+//   - 有 statusError 的 HTTP 响应错误：concurrency/retry/httpx.Retryable
+//     ——429 与 5xx 可重试（**行为变更：429 此前与 4xx 同侧不重试**，
+//     自此与 httpx 的限流语义对齐），其余 1xx/3xx/4xx 是确定性响应/
+//     请求错误不重试（#140：3xx 与 4xx 同侧——重定向不重试）；
+//   - 无 statusError 的网络错误：IsTransportRetryable——ctx 取消/超时
+//     （errors.Is 判定，含包装链）是调用方主动放弃，不重试（此前被判
+//     可重试，紧循环白烧重试预算）；其余网络错误（对端故障/瞬态网络
+//     问题）换节点有意义，可重试。
 func retryable(err error) bool {
 	if localFault(err) {
 		return false
 	}
 	if code, ok := httpStatus(err); ok {
-		return code >= 500
+		return retryhttpx.Retryable(code)
 	}
-	return true
+	return retryhttpx.IsTransportRetryable(err)
 }

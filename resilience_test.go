@@ -474,3 +474,161 @@ func TestHTTPEndpoint_RedirectDoesNotTripBreaker(t *testing.T) {
 		}
 	}
 }
+
+// TestHTTPEndpoint_429Retried 是 #203 的**行为变更**回归：429 自此与 5xx
+// 同侧可重试——重试判定单源 concurrency/retry/httpx.Retryable（429 + 5xx），
+// 与 httpx defaultRetryIf 的限流口径对齐；修复前 retryable 自写
+// code>=500，429 与 4xx 同侧不重试。熔断口径不受影响：429 仍是调用方侧
+// 错误（callerFault，code<500），不计熔断失败、不惩罚节点。
+func TestHTTPEndpoint_429Retried(t *testing.T) {
+	var hits atomic.Int64
+	var seq atomic.Int64
+	factory := newFactoryWithServers(t, localServiceConfig(1), map[string][]func() (string, int){
+		"svc-a": {func() (string, int) { return parseHostPort(ratelimitedServer(t, &hits, &seq)) }},
+	})
+	defer factory.Close()
+
+	ep, err := factory.MakeEndpoint("svc-a")
+	if err != nil {
+		t.Fatalf("MakeEndpoint: %v", err)
+	}
+
+	var result struct {
+		OK bool `json:"ok"`
+	}
+	if _, err := ep(context.Background(), HTTPRequest{
+		Method: http.MethodGet, Path: "/x", Result: &result,
+	}); err != nil {
+		t.Fatalf("expected success after 429 retry (behavior change #203), got: %v", err)
+	}
+	if !result.OK {
+		t.Fatal("expected response body to be decoded")
+	}
+	// 首试 429 + 1 次换实例重试命中 200
+	if got := hits.Load(); got != 2 {
+		t.Fatalf("expected 2 attempts (429 retried), got %d", got)
+	}
+}
+
+// ratelimitedServer 启动首个请求回 429、后续回 200 的测试服务。
+func ratelimitedServer(t *testing.T, hits, seq *atomic.Int64) string {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		if seq.Add(1) == 1 {
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	t.Cleanup(srv.Close)
+	return srv.URL
+}
+
+// TestHTTPEndpoint_ParentCtxCancelStopsRetry 是 #203 的回归：父 ctx 取消
+// 后不再白烧重试预算。分两个面：
+//   - 调用前已取消：一次尝试都不发起，错误可判 context.Canceled；
+//   - 飞行中取消：首个 attempt 因取消失败后立即停止——修复前取消错误
+//     被判可重试，紧循环把 (1+Retry) 次尝试全部打满。
+func TestHTTPEndpoint_ParentCtxCancelStopsRetry(t *testing.T) {
+	t.Run("pre-canceled ctx", func(t *testing.T) {
+		var hits atomic.Int64
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			hits.Add(1)
+			w.WriteHeader(http.StatusOK)
+		}))
+		defer srv.Close()
+		factory := newFactoryWithServers(t, localServiceConfig(2), map[string][]func() (string, int){
+			"svc-a": {func() (string, int) { return parseHostPort(srv.URL) }},
+		})
+		defer factory.Close()
+
+		ep, err := factory.MakeEndpoint("svc-a")
+		if err != nil {
+			t.Fatalf("MakeEndpoint: %v", err)
+		}
+
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel() // 调用前即取消
+		_, err = ep(ctx, HTTPRequest{Method: http.MethodGet, Path: "/x"})
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("expected context.Canceled, got: %v", err)
+		}
+		if got := hits.Load(); got != 0 {
+			t.Fatalf("expected 0 attempts with pre-canceled ctx, got %d", got)
+		}
+	})
+
+	t.Run("cancel mid-flight stops further attempts", func(t *testing.T) {
+		var hits atomic.Int64
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			hits.Add(1)
+			time.Sleep(300 * time.Millisecond) // 飞行期足够长，取消落在首试内
+			w.WriteHeader(http.StatusOK)
+		}))
+		defer srv.Close()
+		factory := newFactoryWithServers(t, localServiceConfig(2), map[string][]func() (string, int){
+			"svc-a": {func() (string, int) { return parseHostPort(srv.URL) }},
+		})
+		defer factory.Close()
+
+		ep, err := factory.MakeEndpoint("svc-a")
+		if err != nil {
+			t.Fatalf("MakeEndpoint: %v", err)
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+		defer cancel()
+		_, _ = ep(ctx, HTTPRequest{Method: http.MethodGet, Path: "/x"})
+		// Retry=2：修复前 3 次尝试全部打满；修复后首试取消即停，恰 1 次真实 HTTP
+		if got := hits.Load(); got != 1 {
+			t.Fatalf("expected exactly 1 attempt after parent cancel (retry budget not burned), got %d", got)
+		}
+	})
+}
+
+// TestHTTPEndpoint_BackoffBetweenAttempts 是 #203 的回归：可重试失败后的
+// 换实例重试不再零延迟——attempt 间存在固定短退避（attemptBackoff），
+// 全程耗时必须覆盖退避时长。修复前两次 attempt 背靠背连击持续故障的后端。
+func TestHTTPEndpoint_BackoffBetweenAttempts(t *testing.T) {
+	var hits atomic.Int64
+	var seq atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		if seq.Add(1) == 1 {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer srv.Close()
+	factory := newFactoryWithServers(t, localServiceConfig(1), map[string][]func() (string, int){
+		"svc-a": {func() (string, int) { return parseHostPort(srv.URL) }},
+	})
+	defer factory.Close()
+
+	ep, err := factory.MakeEndpoint("svc-a")
+	if err != nil {
+		t.Fatalf("MakeEndpoint: %v", err)
+	}
+
+	var result struct {
+		OK bool `json:"ok"`
+	}
+	start := time.Now()
+	if _, err := ep(context.Background(), HTTPRequest{
+		Method: http.MethodGet, Path: "/x", Result: &result,
+	}); err != nil {
+		t.Fatalf("expected success on second attempt, got: %v", err)
+	}
+	elapsed := time.Since(start)
+	if got := hits.Load(); got != 2 {
+		t.Fatalf("expected 2 attempts, got %d", got)
+	}
+	// 500 失败 → attemptBackoff 退避 → 200 成功：耗时必须覆盖退避
+	if elapsed < attemptBackoff {
+		t.Fatalf("elapsed %v < attemptBackoff %v: retry backoff missing", elapsed, attemptBackoff)
+	}
+}

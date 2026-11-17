@@ -11,6 +11,7 @@ import (
 
 	"github.com/oekit/metrics/resilience"
 	pkgerrors "github.com/oekit/pkg/errors"
+	"github.com/oekit/pkg/pathx"
 	"github.com/oekit/pkg/stringx"
 
 	"github.com/cloudwego/hertz/pkg/protocol"
@@ -276,12 +277,18 @@ func (f *HTTPEndpointFactory) Close() {
 // "http://h:8080api/x"，拨号报误导性的 unknown port）；path 为空时保持
 // addr 原样（不追加 "/"）。path 尾斜杠不归一——调用方声明的
 // "/api/v1/" 保持 "/api/v1/"（同 doRequest 处只动 addr 侧的既有约定）。
+//
+// 拼接主体单源下沉 pathx.JoinURL（#532）：path 非空时归一规则与 JoinURL
+// 逐字一致（base 去尾 "/"、path 补前导 "/"），薄委托。path 为空保留本地
+// TrimRight 分支不强行收敛：本仓钉住「空 path 时 addr 尾斜杠仍剥掉」
+// （TestJoinEndpointURL 的 empty path keeps addr (trailing slash
+// stripped)），而 JoinURL 对空 path 的契约是「不触碰 base、尾斜杠原样
+// 保留」，两口径不同——以本仓既有行为为准。
 func joinEndpointURL(addr, path string) string {
-	base := strings.TrimRight(addr, "/")
-	if path != "" && !strings.HasPrefix(path, "/") {
-		path = "/" + path
+	if path == "" {
+		return strings.TrimRight(addr, "/")
 	}
-	return base + path
+	return pathx.JoinURL(addr, path)
 }
 
 func (f *HTTPEndpointFactory) doRequest(ctx context.Context, addr string, req HTTPRequest, timeout time.Duration) (any, error) {

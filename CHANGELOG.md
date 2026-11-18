@@ -2,6 +2,12 @@
 
 由 ekit v0.34.0（git.enjoye.top/enjoydream/ekit，冻结维护）拆分而来。所有 notable 变更记录如下。
 
+## [v0.4.3] — 2026-11-19
+
+- - fix: grpc Acquire 失败不再回写 DoneInfo{Err} 惩罚无辜节点——失败面全是本地错误（池满/池关/拨号配置），与被选节点健康无关，裸写会让 p2c EWMA 给碰巧选中的节点加固定惩罚、流量分布被本地容量问题系统性拉偏；对齐同文件 nodeFaultErr 口径（#124/#97 同一红线），附假 done 断言回归（#215）
+
+关联问题单：nns-endpoint#215。
+
 ## [v0.4.2] — 2026-11-18
 
 - doRequest URL 拼接补前导斜杠归一,Path 无 / 不再拨出坏 URL(httpx#112 孪生)(#202);重试判定收敛 concurrency/retry/httpx 单源——429 按 Retry-After 可重试、父 ctx 取消不再紧循环白烧、attempt 间 50ms 退避(#203);balancer_cache 迁 concurrency/singleflight(ctx 透传)、错误体截断改 stringx.FirstN rune 安全(#204);URL 拼接薄委托 pathx.JoinURL(pkg v0.53.0 原语)

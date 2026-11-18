@@ -770,3 +770,70 @@ func TestGRPCEndpoint_SelectFailureIsLocalError(t *testing.T) {
 		t.Error("local deterministic error must classify as caller fault (not a node fault)")
 	}
 }
+
+// stubNode 是选择器测试用的固定节点（#215 回归测试用）。
+type stubNode struct{ addr string }
+
+func (n *stubNode) Address() string             { return n.addr }
+func (n *stubNode) Weight() float64             { return 1 }
+func (n *stubNode) ServiceName() string         { return "svc-a" }
+func (n *stubNode) Metadata() map[string]string { return nil }
+
+// captureDoneSelector 选点恒返回同一节点，done 收集回写的 DoneInfo
+// （#215 回归测试用：用假 done 断言 Acquire 失败路径的回写 Err 归属）。
+type captureDoneSelector struct {
+	node  loadbalance.Node
+	dones *[]loadbalance.DoneInfo
+}
+
+func (s *captureDoneSelector) Select(context.Context, []loadbalance.Node, ...loadbalance.SelectOption) (loadbalance.Node, loadbalance.DoneFunc, error) {
+	return s.node, func(_ context.Context, di loadbalance.DoneInfo) {
+		*s.dones = append(*s.dones, di)
+	}, nil
+}
+
+// TestGRPCEndpoint_AcquireFailureDoesNotPenalizeNode 是 #215 的回归测试：
+// Acquire 失败时 done 必须回写 Err: nil——Acquire 失败面全是本地错误
+// （池满 max size reached / 池已 Close 的 ErrPoolClosed / 拨号配置错误，
+// pool.go），与被选节点的健康无关；p2c makeDone 对非 nil Err 一律追加
+// EWMA 惩罚时长，本地容量问题（池满期间每次调用选中的节点都吃固定惩罚）
+// 不得系统性拉偏流量分布。与 #97（熔断拒绝不回写节点惩罚）同一红线。
+//
+// 本地失败注入：直接 Close 连接池，Acquire 恒返回 ErrPoolClosed（入口终态
+// 闸短路，不触达网络、不确定时）。
+func TestGRPCEndpoint_AcquireFailureDoesNotPenalizeNode(t *testing.T) {
+	c := newTestServiceClient(t)
+	var dones []loadbalance.DoneInfo
+	factory := NewGRPCEndpointFactory(c, WithSelector(&captureDoneSelector{
+		node:  &stubNode{addr: "127.0.0.1:1"},
+		dones: &dones,
+	}))
+	defer factory.Close()
+
+	ep, err := factory.MakeEndpoint("svc-a")
+	if err != nil {
+		t.Fatalf("MakeEndpoint: %v", err)
+	}
+
+	factory.pool.Close()
+
+	_, callErr := ep(context.Background(), GRPCRequest{
+		GrpcServiceName: "helloworld.Greeter",
+		Method:          "SayHello",
+		Request:         wrapperspb.String("x"),
+		Reply:           &wrapperspb.StringValue{},
+	})
+	if callErr == nil {
+		t.Fatal("expected error from closed pool")
+	}
+	if !containsAny(callErr.Error(), "get grpc conn") {
+		t.Errorf("expected 'get grpc conn' context in error, got: %v", callErr)
+	}
+
+	if len(dones) != 1 {
+		t.Fatalf("done called %d times, want 1", len(dones))
+	}
+	if dones[0].Err != nil {
+		t.Fatalf("Acquire 失败回写 Err = %v, want nil（本地错误不惩罚节点，#215）", dones[0].Err)
+	}
+}

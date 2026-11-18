@@ -167,7 +167,16 @@ func (f *GRPCEndpointFactory) MakeEndpoint(serviceName string, opts ...grpc.Dial
 
 		conn, err := f.pool.Acquire(ctx, n.Address(), opts...)
 		if err != nil {
-			done(ctx, loadbalance.DoneInfo{Err: err})
+			// #215：Acquire 失败面全是本地错误（池满 max size reached、池已
+			// Close 的 ErrPoolClosed、拨号配置错误，见 pool.go），与被选节点
+			// 的健康无关——done 回写 Err: nil，不惩罚「碰巧被选中的节点」：
+			// p2c makeDone 对非 nil Err 一律追加惩罚时长，池满期间每次调用
+			// 选中的节点都吃固定 EWMA 惩罚，本地容量问题会系统性拉偏流量
+			// 分布。与 #97（熔断拒绝不回写节点惩罚）同一红线、与 #124
+			// （调用错误经 nodeFaultErr 归一为 nil）同一口径；错误本身仍经
+			// 返回值透出（"get grpc conn" 包装），与 #137 选点失败路径同为
+			// 本地确定性错误形态、不打日志。
+			done(ctx, loadbalance.DoneInfo{Err: nil})
 			return nil, pkgerrors.Wrapf(err, "get grpc conn")
 		}
 		// #99：借出记在途引用，调用结束归还——空闲驱逐不会关闭有在途

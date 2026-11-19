@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	nnsclient "github.com/oekit/nns/client"
@@ -156,7 +157,7 @@ func TestRejectIfCircuitOpen(t *testing.T) {
 	if !errors.Is(err, ErrCircuitOpen) {
 		t.Fatalf("ErrOpenState must map to ErrCircuitOpen, got: %v", err)
 	}
-	if !containsAny(err.Error(), "service=svc-a") {
+	if !strings.Contains(err.Error(), "service=svc-a") {
 		t.Errorf("mapped error must carry service context, got: %v", err)
 	}
 

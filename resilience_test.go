@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -231,7 +232,7 @@ func TestHTTPEndpoint_DecodeErrorNotRetried(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected decode error to propagate")
 	}
-	if !containsAny(err.Error(), "unmarshal response") {
+	if !strings.Contains(err.Error(), "unmarshal response") {
 		t.Errorf("expected decode error shape preserved, got: %v", err)
 	}
 	// 解码失败必须恰好 1 次真实 HTTP（修复前 1+Retry=3 次）
@@ -332,9 +333,9 @@ func TestHTTPEndpoint_MarshalErrorDoesNotTripBreaker(t *testing.T) {
 			Body:   make(chan int),
 		}); callErr == nil {
 			t.Fatal("expected marshal error")
-		} else if containsAny(callErr.Error(), "circuit breaker") {
+		} else if strings.Contains(callErr.Error(), "circuit breaker") {
 			t.Fatalf("marshal error must not trip the breaker, got: %v", callErr)
-		} else if !containsAny(callErr.Error(), "marshal body") {
+		} else if !strings.Contains(callErr.Error(), "marshal body") {
 			t.Fatalf("expected marshal body error shape, got: %v", callErr)
 		}
 	}

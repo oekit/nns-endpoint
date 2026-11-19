@@ -5,10 +5,10 @@ go 1.26.0
 require (
 	github.com/cloudwego/hertz v0.10.6
 	github.com/oekit/concurrency v0.39.1
-	github.com/oekit/httpx v0.12.3
+	github.com/oekit/httpx v0.13.0
 	github.com/oekit/logx v0.12.0
 	github.com/oekit/metrics v0.4.2
-	github.com/oekit/nns v0.9.4
+	github.com/oekit/nns v0.10.0
 	github.com/oekit/pkg v0.55.1
 	github.com/oekit/registry v0.8.2
 	github.com/oekit/registry/nacos v0.2.0

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -190,7 +191,7 @@ func TestGRPCEndpoint_InvokeFailureReportsDone(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected Invoke failure to propagate, got nil")
 	}
-	if !containsAny(err.Error(), "boom") {
+	if !strings.Contains(err.Error(), "boom") {
 		t.Errorf("expected server error to surface, got: %v", err)
 	}
 
@@ -385,7 +386,7 @@ func TestGRPCEndpoint_ReplyAndRequestValidation(t *testing.T) {
 		Request:         wrapperspb.String("x"),
 		// Reply 缺失
 	})
-	if err == nil || !containsAny(err.Error(), "Reply must be a non-nil proto.Message pointer") {
+	if err == nil || !strings.Contains(err.Error(), "Reply must be a non-nil proto.Message pointer") {
 		t.Errorf("expected missing-Reply error, got: %v", err)
 	}
 
@@ -395,7 +396,7 @@ func TestGRPCEndpoint_ReplyAndRequestValidation(t *testing.T) {
 		Request:         "not-a-proto-message", // 非 proto.Message
 		Reply:           &wrapperspb.StringValue{},
 	})
-	if err == nil || !containsAny(err.Error(), "must implement proto.Message") {
+	if err == nil || !strings.Contains(err.Error(), "must implement proto.Message") {
 		t.Errorf("expected non-proto request error, got: %v", err)
 	}
 }

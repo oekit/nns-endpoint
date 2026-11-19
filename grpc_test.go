@@ -3,6 +3,7 @@ package endpoint
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -138,7 +139,7 @@ func TestGRPCPool_Get_RequiresExplicitCredentials(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected no-transport-security error, got nil")
 	}
-	if !containsAny(err.Error(), "no transport security set") {
+	if !strings.Contains(err.Error(), "no transport security set") {
 		t.Errorf("expected 'no transport security set' error, got: %v", err)
 	}
 
@@ -197,7 +198,7 @@ func TestGRPCEndpoint_MakeEndpoint_InvalidRequestType(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected type assertion error, got nil")
 	}
-	if !containsAny(err.Error(), "invalid request type") {
+	if !strings.Contains(err.Error(), "invalid request type") {
 		t.Errorf("expected 'invalid request type' error, got: %v", err)
 	}
 }
@@ -510,7 +511,7 @@ func TestGRPCPool_Acquire_FullPoolEvictSkipsInFlight(t *testing.T) {
 
 	// 满池创建新地址：驱逐跳过在用的 A → 拒绝创建
 	_, err = pool.Get(context.Background(), addrB, dialOpts...)
-	if err == nil || !containsAny(err.Error(), "max size") {
+	if err == nil || !strings.Contains(err.Error(), "max size") {
 		t.Fatalf("expected max size reached while in-flight conn occupies pool, got: %v", err)
 	}
 
@@ -647,7 +648,7 @@ func TestGRPCPool_Create_FullPoolRejectsWhenNoIdle(t *testing.T) {
 	pool.Release("10.0.0.1:1", conn1)
 
 	_, err = pool.Get(context.Background(), "10.0.0.2:2", withTestInsecureCreds())
-	if err == nil || !containsAny(err.Error(), "max size") {
+	if err == nil || !strings.Contains(err.Error(), "max size") {
 		t.Fatalf("expected max size reached (fresh pool, nothing idle), got: %v", err)
 	}
 }
@@ -672,7 +673,7 @@ func TestGRPCPool_Create_FullPoolEvictsIdleOtherAddr(t *testing.T) {
 	pool.Release(addrA, connA)
 
 	// A 仍在活跃窗口内：无可驱逐条目，新地址被拒（拒绝语义保持）
-	if _, err = pool.Get(context.Background(), addrB, withTestInsecureCreds()); err == nil || !containsAny(err.Error(), "max size") {
+	if _, err = pool.Get(context.Background(), addrB, withTestInsecureCreds()); err == nil || !strings.Contains(err.Error(), "max size") {
 		t.Fatalf("expected max size reached while old entry fresh, got: %v", err)
 	}
 
@@ -760,7 +761,7 @@ func TestGRPCEndpoint_SelectFailureIsLocalError(t *testing.T) {
 	if !errors.As(err, &le) {
 		t.Fatalf("select failure must be wrapped as localError (#137), got %T: %v", err, err)
 	}
-	if !containsAny(err.Error(), "select node") {
+	if !strings.Contains(err.Error(), "select node") {
 		t.Errorf("expected 'select node' context in error, got: %v", err)
 	}
 	if retryable(err) {
@@ -826,7 +827,7 @@ func TestGRPCEndpoint_AcquireFailureDoesNotPenalizeNode(t *testing.T) {
 	if callErr == nil {
 		t.Fatal("expected error from closed pool")
 	}
-	if !containsAny(callErr.Error(), "get grpc conn") {
+	if !strings.Contains(callErr.Error(), "get grpc conn") {
 		t.Errorf("expected 'get grpc conn' context in error, got: %v", callErr)
 	}
 

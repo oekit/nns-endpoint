@@ -5,8 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -43,32 +46,25 @@ func newHTTPFactoryWithTestServer(t *testing.T, handler http.HandlerFunc) *HTTPE
 	return NewHTTPEndpointFactory(c)
 }
 
-// parseHostPort extracts host and port from "http://host:port".
-func parseHostPort(url string) (string, int) {
-	const prefix = "http://"
-	if len(url) < len(prefix) || url[:len(prefix)] != prefix {
-		return url, 0
+// parseHostPort extracts host and port from "http://host:port"（httptest
+// server URL 形态）。
+// #222：原 26 行手写逐字节解析（与 httpx 同名 helper 逐字节双份）改走
+// stdlib url.Parse + net.SplitHostPort；调用点只喂 httptest URL，解析失败
+// 时按原口径返回 (原串, 0) 让后续断言显式失败。
+func parseHostPort(rawURL string) (string, int) {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return rawURL, 0
 	}
-	rest := url[len(prefix):]
-	colon := -1
-	for i := 0; i < len(rest); i++ {
-		if rest[i] == ':' {
-			colon = i
-			break
-		}
+	host, portStr, err := net.SplitHostPort(u.Host)
+	if err != nil {
+		return u.Host, 0
 	}
-	if colon < 0 {
-		return rest, 0
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		return host, 0
 	}
-	port := 0
-	for i := colon + 1; i < len(rest); i++ {
-		ch := rest[i]
-		if ch < '0' || ch > '9' {
-			break
-		}
-		port = port*10 + int(ch-'0')
-	}
-	return rest[:colon], port
+	return host, port
 }
 
 // TestHTTPEndpoint_DoRequest_HappyPath covers the 200 + JSON body path.
@@ -143,7 +139,7 @@ func TestHTTPEndpoint_DoRequest_NonSuccess(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for 500 response, got nil")
 	}
-	if !containsAny(err.Error(), "500") {
+	if !strings.Contains(err.Error(), "500") {
 		t.Errorf("expected error to mention 500, got: %v", err)
 	}
 }
@@ -280,7 +276,7 @@ func TestHTTPEndpoint_MakeEndpoint_InvalidRequestType(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected type assertion error, got nil")
 	}
-	if !containsAny(err.Error(), "invalid request type") {
+	if !strings.Contains(err.Error(), "invalid request type") {
 		t.Errorf("expected 'invalid request type' error, got: %v", err)
 	}
 }
@@ -461,7 +457,7 @@ func TestHTTPEndpoint_DoRequest_StripTrailingSlash(t *testing.T) {
 	if got == nil {
 		t.Fatal("no request captured")
 	}
-	if containsAny(*got, "//") {
+	if strings.Contains(*got, "//") {
 		t.Errorf("expected no '//' in path, got %q", *got)
 	}
 }
@@ -519,21 +515,6 @@ func TestHTTPEndpoint_TimeoutFallbackWhenUnset(t *testing.T) {
 	if got["ok"] != true {
 		t.Errorf("expected ok=true, got %v", got)
 	}
-}
-
-// containsAny is a small strings.Contains helper kept inline to avoid
-// importing strings for a single use.
-func containsAny(s, sub string) bool {
-	return len(s) >= len(sub) && (s == sub || indexOfStr(s, sub) >= 0)
-}
-
-func indexOfStr(s, sub string) int {
-	for i := 0; i+len(sub) <= len(s); i++ {
-		if s[i:i+len(sub)] == sub {
-			return i
-		}
-	}
-	return -1
 }
 
 // TestJoinEndpointURL 钉住 #202 的拼接归一口径（与 httpx#112 同语义）：

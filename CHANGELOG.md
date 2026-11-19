@@ -2,6 +2,10 @@
 
 由 ekit v0.34.0（git.enjoye.top/enjoydream/ekit，冻结维护）拆分而来。所有 notable 变更记录如下。
 
+## [v0.5.0] — 2026-11-20
+
+- test(http): parseHostPort 26 行手写解析换标准库（url.Parse+SplitHostPort+Atoi，20 个调用点零改动）；containsAny 手搓 indexOfStr 换 strings.Contains——与 httpx#267 逐字节孪生成对清理（#222）
+
 ## [v0.4.3] — 2026-11-19
 
 - - fix: grpc Acquire 失败不再回写 DoneInfo{Err} 惩罚无辜节点——失败面全是本地错误（池满/池关/拨号配置），与被选节点健康无关，裸写会让 p2c EWMA 给碰巧选中的节点加固定惩罚、流量分布被本地容量问题系统性拉偏；对齐同文件 nodeFaultErr 口径（#124/#97 同一红线），附假 done 断言回归（#215）

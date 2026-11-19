@@ -10,7 +10,7 @@ require (
 	github.com/oekit/metrics v0.4.2
 	github.com/oekit/nns v0.9.4
 	github.com/oekit/pkg v0.55.1
-	github.com/oekit/registry v0.8.1
+	github.com/oekit/registry v0.8.2
 	github.com/oekit/registry/nacos v0.2.0
 	github.com/prometheus/client_golang v1.25.0
 	github.com/sony/gobreaker v1.0.0

@@ -332,6 +332,175 @@ func (s *blockingConfigStore) StopListenConfig(context.Context, string, string) 
 	return nil
 }
 
+// gatedConfigStore 在每次 GetConfig 进入时投递 started、按入口时刻的内容
+// 返回（#231 reset/inflight 竞态测试用）：首个调用可阻塞在 release 上，
+// 让「首建已拿到旧配置、尚未 writeThrough」的窗口可控，期间可执行 reset。
+type gatedConfigStore struct {
+	mu         sync.Mutex
+	content    string
+	blockFirst bool
+	started    chan struct{}
+	release    chan struct{}
+}
+
+func (s *gatedConfigStore) GetConfig(_ context.Context, _, _ string) (string, error) {
+	s.mu.Lock()
+	content := s.content
+	block := s.blockFirst
+	s.blockFirst = false
+	s.mu.Unlock()
+	s.started <- struct{}{}
+	if block {
+		<-s.release
+	}
+	return content, nil
+}
+
+func (s *gatedConfigStore) ListenConfig(context.Context, string, string, func(string)) error {
+	return nil
+}
+
+func (s *gatedConfigStore) StopListenConfig(context.Context, string, string) error {
+	return nil
+}
+
+func (s *gatedConfigStore) setContent(content string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.content = content
+}
+
+// TestSelectorCache_ResetRejectsStaleWrite 是 #231 的 reset/inflight 竞态
+// 回归（写回面）：首建已按旧配置开始（GetConfig 返回前）时发生 reset——
+// 旧构建的 writeThrough 因代数变化被拒写，缓存保持为空（此前普通双检
+// 写回会把旧配置 selector 写进空缓存，热更新静默丢失、无 TTL 纠正）。
+func TestSelectorCache_ResetRejectsStaleWrite(t *testing.T) {
+	store := &gatedConfigStore{
+		content:    `{"lb":"roundrobin"}`,
+		blockFirst: true,
+		started:    make(chan struct{}, 4),
+		release:    make(chan struct{}),
+	}
+	c := nnsclient.New(nnsclient.WithConfigStore(store))
+	factory := NewHTTPEndpointFactory(c)
+	defer factory.Close()
+	cache := factory.selectorCache
+
+	staleCh := make(chan loadbalance.Selector, 1)
+	staleErr := make(chan error, 1)
+	go func() {
+		sel, err := cache.getOrCreate(context.Background(), "svc-a")
+		staleCh <- sel
+		staleErr <- err
+	}()
+	<-store.started // 旧构建已拿到 roundrobin 配置，阻塞在 writeThrough 之前
+
+	// 配置热更：reset 递增代数，内容切到 p2c
+	cache.reset("svc-a")
+	store.setContent(`{"lb":"p2c"}`)
+	close(store.release) // 放行旧构建
+
+	if err := <-staleErr; err != nil {
+		t.Fatalf("stale first build: %v", err)
+	}
+	<-staleCh
+
+	// 旧构建产物不得进缓存（代数不匹配）
+	cache.mu.RLock()
+	_, cached := cache.selectors["svc-a"]
+	cache.mu.RUnlock()
+	if cached {
+		t.Fatal("stale selector built before reset must not be cached (#231)")
+	}
+
+	// reset 后的下一次调用按新配置重建并正常入缓存
+	fresh, err := cache.getOrCreate(context.Background(), "svc-a")
+	if err != nil {
+		t.Fatalf("post-reset build: %v", err)
+	}
+	wantP2C, err := loadbalance.NewSelector(loadbalance.StrategyP2C)
+	if err != nil {
+		t.Fatalf("NewSelector(p2c): %v", err)
+	}
+	if got := selectorKind(fresh); got != selectorKind(wantP2C) {
+		t.Fatalf("post-reset call must build from new config (p2c), got %s", got)
+	}
+	cache.mu.RLock()
+	cachedSel, ok := cache.selectors["svc-a"]
+	cache.mu.RUnlock()
+	if !ok {
+		t.Fatal("post-reset selector must be cached")
+	}
+	if got := selectorKind(cachedSel); got != selectorKind(wantP2C) {
+		t.Fatalf("cache after reset = %s, want p2c", got)
+	}
+}
+
+// TestSelectorCache_ResetDoesNotJoinStaleFlight 是 #231 的另一面：reset 后
+// 到达的调用不 join reset 前已在飞的旧配置构建（flight key 带代数），否则
+// 热更后首个调用仍拿到旧配置 selector。
+func TestSelectorCache_ResetDoesNotJoinStaleFlight(t *testing.T) {
+	store := &gatedConfigStore{
+		content:    `{"lb":"roundrobin"}`,
+		blockFirst: true,
+		started:    make(chan struct{}, 4),
+		release:    make(chan struct{}),
+	}
+	c := nnsclient.New(nnsclient.WithConfigStore(store))
+	factory := NewHTTPEndpointFactory(c)
+	defer factory.Close()
+	cache := factory.selectorCache
+
+	staleErr := make(chan error, 1)
+	go func() {
+		_, err := cache.getOrCreate(context.Background(), "svc-a")
+		staleErr <- err
+	}()
+	<-store.started // 旧构建已拿到 roundrobin 配置并阻塞
+
+	// 配置热更 + reset；新调用必须另起按 p2c 的构建
+	cache.reset("svc-a")
+	store.setContent(`{"lb":"p2c"}`)
+
+	freshCh := make(chan loadbalance.Selector, 1)
+	freshErr := make(chan error, 1)
+	go func() {
+		sel, err := cache.getOrCreate(context.Background(), "svc-a")
+		freshCh <- sel
+		freshErr <- err
+	}()
+	// 新构建进入 GetConfig 说明没有并入旧 flight；若回归（并入旧 flight）
+	// 则这里的等待超时，随后放行旧构建，由结果断言显式失败而不是挂死。
+	select {
+	case <-store.started:
+	case <-time.After(2 * time.Second):
+	}
+
+	close(store.release)
+
+	if err := <-staleErr; err != nil {
+		t.Fatalf("stale first build: %v", err)
+	}
+	if err := <-freshErr; err != nil {
+		t.Fatalf("post-reset build: %v", err)
+	}
+	fresh := <-freshCh
+
+	wantP2C, err := loadbalance.NewSelector(loadbalance.StrategyP2C)
+	if err != nil {
+		t.Fatalf("NewSelector(p2c): %v", err)
+	}
+	if got := selectorKind(fresh); got != selectorKind(wantP2C) {
+		t.Fatalf("post-reset call joined stale flight, got %s, want p2c (#231)", got)
+	}
+	cache.mu.RLock()
+	cached, ok := cache.selectors["svc-a"]
+	cache.mu.RUnlock()
+	if !ok || selectorKind(cached) != selectorKind(wantP2C) {
+		t.Fatalf("cache = %v (%v), want p2c", cached, ok)
+	}
+}
+
 // TestSelectorCache_ConcurrentFirstBuildSingleflight 是 #136 的回归测试：
 // 并发首建同一服务只允许一次配置拉取、共享同一个 selector 实例——此前
 // 快路径未命中后 N 个并发首调各自拉配置、各建一个 selector，仅靠写锁

@@ -511,6 +511,150 @@ func TestHTTPEndpoint_429Retried(t *testing.T) {
 	}
 }
 
+// TestHTTPEndpoint_NonIdempotentPostNotRetried 是 #231 的回归：POST 5xx
+// 缺省不换实例重试——修复前重试循环只看 retryable（429/5xx/网络错误），
+// ServiceBasic.Retry 缺省 3 时 POST /pay、/orders 被跨实例重放，重复
+// 扣款/下单。方法门只拦「重放」，首试照常发出，错误原样返回。
+func TestHTTPEndpoint_NonIdempotentPostNotRetried(t *testing.T) {
+	var hits atomic.Int64
+	bad := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer bad.Close()
+	host, port := parseHostPort(bad.URL)
+
+	factory := newFactoryWithServers(t, localServiceConfig(2), map[string][]func() (string, int){
+		"svc-a": {func() (string, int) { return host, port }},
+	})
+	defer factory.Close()
+
+	ep, err := factory.MakeEndpoint("svc-a")
+	if err != nil {
+		t.Fatalf("MakeEndpoint: %v", err)
+	}
+	_, err = ep(context.Background(), HTTPRequest{Method: http.MethodPost, Path: "/pay"})
+	if err == nil {
+		t.Fatal("expected 500 error from POST")
+	}
+	if code, ok := httpStatus(err); !ok || code != http.StatusInternalServerError {
+		t.Fatalf("expected last error to carry 500, got: %v", err)
+	}
+	if got := hits.Load(); got != 1 {
+		t.Fatalf("POST 5xx must not be replayed (idempotency gate #231), got %d attempts", got)
+	}
+}
+
+// TestHTTPEndpoint_ExplicitIdempotentPostRetried 钉住显式开关语义（#231）：
+// 非幂等方法置 HTTPRequest.Idempotent=true 后重试放行（如带幂等键的
+// POST）——显式声明优先于方法门。
+func TestHTTPEndpoint_ExplicitIdempotentPostRetried(t *testing.T) {
+	var hits atomic.Int64
+	var seq atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		if seq.Add(1) == 1 {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer srv.Close()
+
+	factory := newFactoryWithServers(t, localServiceConfig(1), map[string][]func() (string, int){
+		"svc-a": {func() (string, int) { return parseHostPort(srv.URL) }},
+	})
+	defer factory.Close()
+
+	ep, err := factory.MakeEndpoint("svc-a")
+	if err != nil {
+		t.Fatalf("MakeEndpoint: %v", err)
+	}
+	var result struct {
+		OK bool `json:"ok"`
+	}
+	if _, err := ep(context.Background(), HTTPRequest{
+		Method:     http.MethodPost,
+		Path:       "/orders",
+		Idempotent: true,
+		Result:     &result,
+	}); err != nil {
+		t.Fatalf("expected success via explicit idempotent retry, got: %v", err)
+	}
+	if !result.OK {
+		t.Fatal("expected response body to be decoded")
+	}
+	if got := hits.Load(); got != 2 {
+		t.Fatalf("expected 2 attempts with Idempotent=true, got %d", got)
+	}
+}
+
+// TestHTTPEndpoint_429RetryAfterHint 是 #231 的回归：429 携带 Retry-After
+// 时 attempt 间等待取 max(Retry-After, attemptBackoff)——修复前固定 50ms，
+// 上游 Retry-After: 1 的重试全部落在限流窗口内。测试断言总耗时覆盖 1s
+// 建议且第二次尝试成功。
+func TestHTTPEndpoint_429RetryAfterHint(t *testing.T) {
+	var hits atomic.Int64
+	var seq atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		if seq.Add(1) == 1 {
+			w.Header().Set("Retry-After", "1")
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer srv.Close()
+
+	factory := newFactoryWithServers(t, localServiceConfig(1), map[string][]func() (string, int){
+		"svc-a": {func() (string, int) { return parseHostPort(srv.URL) }},
+	})
+	defer factory.Close()
+
+	ep, err := factory.MakeEndpoint("svc-a")
+	if err != nil {
+		t.Fatalf("MakeEndpoint: %v", err)
+	}
+
+	start := time.Now()
+	var result struct {
+		OK bool `json:"ok"`
+	}
+	if _, err := ep(context.Background(), HTTPRequest{
+		Method: http.MethodGet, Path: "/x", Result: &result,
+	}); err != nil {
+		t.Fatalf("expected success after Retry-After backoff, got: %v", err)
+	}
+	elapsed := time.Since(start)
+	if got := hits.Load(); got != 2 {
+		t.Fatalf("expected 2 attempts, got %d", got)
+	}
+	if elapsed < time.Second {
+		t.Fatalf("elapsed %v < Retry-After 1s: hint not honored (#231)", elapsed)
+	}
+}
+
+// TestAttemptBackoffFor 钉住退避计算：无建议/建议短于下限取 attemptBackoff，
+// 建议更长时取建议（#231）。不依赖真实等待，确定性覆盖 max 语义。
+func TestAttemptBackoffFor(t *testing.T) {
+	if got := attemptBackoffFor(&statusError{code: 500, err: errors.New("boom")}); got != attemptBackoff {
+		t.Fatalf("no hint: got %v, want %v", got, attemptBackoff)
+	}
+	if got := attemptBackoffFor(&statusError{
+		code: 429, err: errors.New("limited"), retryAfter: time.Millisecond, hasRetryAfter: true,
+	}); got != attemptBackoff {
+		t.Fatalf("short hint: got %v, want %v (max with attemptBackoff)", got, attemptBackoff)
+	}
+	if got := attemptBackoffFor(&statusError{
+		code: 429, err: errors.New("limited"), retryAfter: 2 * time.Second, hasRetryAfter: true,
+	}); got != 2*time.Second {
+		t.Fatalf("long hint: got %v, want 2s", got)
+	}
+}
+
 // ratelimitedServer 启动首个请求回 429、后续回 200 的测试服务。
 func ratelimitedServer(t *testing.T, hits, seq *atomic.Int64) string {
 	t.Helper()

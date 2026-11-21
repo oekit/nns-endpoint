@@ -16,6 +16,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/cloudwego/hertz/pkg/protocol"
 	nnsclient "github.com/oekit/nns/client"
 	"github.com/oekit/nns/metadata"
 	"github.com/oekit/registry"
@@ -469,6 +470,28 @@ func TestHTTPEndpoint_Close(t *testing.T) {
 	)
 	factory := NewHTTPEndpointFactory(c)
 	factory.Close() // should not panic
+}
+
+// TestHTTPFactory_ReadTimeoutFollowsRequest 是 #231 的回归：内层 HTTP 客户端
+// 不再固定 30s 读超时——客户端级读预算关闭（WithStream），单次尝试的读
+// 预算随请求级选项设置（config.WithReadTimeout），服务治理 ReadTimeout
+// 配 45s/60s 的慢接口不会被固定 30s 掐断。
+func TestHTTPFactory_ReadTimeoutFollowsRequest(t *testing.T) {
+	factory := newHTTPFactoryWithTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	defer factory.Close()
+
+	if got := factory.http.Hertz().GetOptions().ReadTimeout; got != 0 {
+		t.Fatalf("inner client read timeout = %v, want 0 (per-request #231)", got)
+	}
+
+	hReq := protocol.AcquireRequest()
+	defer protocol.ReleaseRequest(hReq)
+	applyReadTimeout(hReq, 45*time.Second)
+	if got := hReq.Options().ReadTimeout(); got != 45*time.Second {
+		t.Fatalf("per-request read timeout = %v, want 45s (#231)", got)
+	}
 }
 
 // TestHTTPEndpoint_TimeoutFallbackWhenUnset 覆盖 #75：req.Timeout 与服务治理

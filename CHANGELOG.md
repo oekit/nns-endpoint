@@ -2,6 +2,19 @@
 
 由 ekit v0.34.0（git.enjoye.top/enjoydream/ekit，冻结维护）拆分而来。所有 notable 变更记录如下。
 
+## [v0.5.1] — 2026-11-21
+
+- 第三轮设计/缺陷审计（2026-11-21）nns-endpoint 修复：
+
+- fix: 重试前按 HTTP 方法幂等门（GET/HEAD/PUT/DELETE/OPTIONS/TRACE；POST/PATCH 缺省不重试）+ HTTPRequest.Idempotent 显式开关——POST 5xx 不再缺省重放 3 次（#231）
+- fix: 429 退避取 max(Retry-After, attemptBackoff)——不再 150ms 内重打限流窗口（#231）
+- fix: 内层 HTTP 客户端读超时随请求动态设置（WithStream + 逐请求 ReadTimeout）——服务治理 45s/60s 超时不再被 30s 硬编码掐断（#231）
+- feat: gRPC 池新增 WithPoolMaxSize/WithPoolIdleTTL + 满池 LRU 淘汰（lastUsed 最旧且 inFlight==0）——滚动发布 128 地址上限问题可调可解（#231）
+- fix: selector 缓存引入 epoch（reset 递增、writeThrough 仅在 epoch 未变写入）——配置热更不再被首建竞态覆盖（#231）
+- fix: HTTP 工厂 Close 置终态（存量端点 ErrFactoryClosed）+ 调内层 Close，与 gRPC 对齐（#231）
+
+关联问题单：nns-endpoint#231。
+
 ## [v0.5.0] — 2026-11-20
 
 - test(http): parseHostPort 26 行手写解析换标准库（url.Parse+SplitHostPort+Atoi，20 个调用点零改动）；containsAny 手搓 indexOfStr 换 strings.Contains——与 httpx#267 逐字节孪生成对清理（#222）

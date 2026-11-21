@@ -49,6 +49,10 @@ type factoryConfig struct {
 	// selector 非空时全服务共用该节点选择器（WithSelector 注入），
 	// 覆盖服务治理配置中的 lb 策略。
 	selector loadbalance.Selector
+	// poolMaxSize/poolIdleTTL 是 gRPC 连接池参数（#231）；0 表示取池默认值
+	// （defaultMaxPoolSize / defaultIdleTTL）。HTTP 工厂忽略。
+	poolMaxSize int
+	poolIdleTTL time.Duration
 }
 
 // EndpointFactoryOption 是端点工厂（HTTP/gRPC）的配置函数类型。
@@ -65,6 +69,34 @@ type EndpointFactoryOption func(*factoryConfig)
 func WithBreakerSettings(tmpl gobreaker.Settings) EndpointFactoryOption {
 	return func(c *factoryConfig) {
 		c.breakerTmpl = tmpl
+	}
+}
+
+// WithPoolMaxSize 设置 gRPC 连接池最大连接数（#231，缺省
+// defaultMaxPoolSize=128）。仅对 NewGRPCEndpointFactory 生效，HTTP 工厂
+// 忽略。maxSize <= 0 是构造期非法值（fail-fast panic，AGENTS.md Option
+// 总则）——显式配置一个非正上限没有可用语义，静默回退默认值会掩盖配置错误。
+func WithPoolMaxSize(maxSize int) EndpointFactoryOption {
+	return func(c *factoryConfig) {
+		if maxSize <= 0 {
+			panic("nns-endpoint: WithPoolMaxSize requires maxSize > 0")
+		}
+		c.poolMaxSize = maxSize
+	}
+}
+
+// WithPoolIdleTTL 设置 gRPC 连接池空闲连接驱逐时间（#231，缺省
+// defaultIdleTTL=10m）。仅对 NewGRPCEndpointFactory 生效，HTTP 工厂忽略。
+// idleTTL <= 0 是构造期非法值（fail-fast panic，AGENTS.md Option 总则）。
+//
+// 取 ≤0 会退化为「任何 Get 都视为空闲超龄」或「永不超龄」，与运维意图
+// 不一致且难以从行为反推，故显式拒绝。
+func WithPoolIdleTTL(idleTTL time.Duration) EndpointFactoryOption {
+	return func(c *factoryConfig) {
+		if idleTTL <= 0 {
+			panic("nns-endpoint: WithPoolIdleTTL requires idleTTL > 0")
+		}
+		c.poolIdleTTL = idleTTL
 	}
 }
 

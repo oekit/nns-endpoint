@@ -3,6 +3,7 @@ package endpoint
 import (
 	"errors"
 	"fmt"
+	"time"
 
 	retryhttpx "github.com/oekit/concurrency/retry/httpx"
 	"github.com/oekit/httpx"
@@ -42,10 +43,28 @@ func rejectIfCircuitOpen(err error, service, kind string, m *resilience.Metrics)
 type statusError struct {
 	code int
 	err  error
+	// retryAfter 是本次响应的 Retry-After 建议（#231）：429/503 配
+	// Retry-After 是限流的标准形态，重试等待据此退避而不是恒走固定
+	// attemptBackoff。hasRetryAfter 区分「未携带」与「Retry-After: 0」
+	// （0 是合法建议：立即重试），与 concurrency/retry/httpx.ParseRetryAfter
+	// 的 (d, ok) 口径一致。
+	retryAfter    time.Duration
+	hasRetryAfter bool
 }
 
 func (e *statusError) Error() string { return e.err.Error() }
 func (e *statusError) Unwrap() error { return e.err }
+
+// retryAfterHintOf 提取错误链中 statusError 携带的 Retry-After 建议。
+// ok=false 表示响应未携带可解析的建议（或不是 HTTP 状态错误），调用方
+// 回退固定 attemptBackoff。
+func retryAfterHintOf(err error) (time.Duration, bool) {
+	var se *statusError
+	if errors.As(err, &se) && se.hasRetryAfter {
+		return se.retryAfter, true
+	}
+	return 0, false
+}
 
 // httpStatus 从错误链中提取 HTTP 状态码；ok=false 表示非 HTTP 状态错误
 // （网络层错误，无状态码）。

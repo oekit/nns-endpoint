@@ -2,8 +2,12 @@ package endpoint
 
 import (
 	"context"
+	"errors"
+	"io"
+	"net/http"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 	"weak"
@@ -190,6 +194,48 @@ func TestGRPCEndpointFactoryClose_ConfigEventNoLongerResetsCache(t *testing.T) {
 	if sel3 != sel2 {
 		t.Fatal("factory closed: config event must no longer reset the selector cache (#135)")
 	}
+}
+
+// TestHTTPEndpointFactoryClose_EndpointsRejected 是 #231 的回归：HTTP 工厂
+// Close 必须登记终态——存量端点闭包在 Close 后短路返回 ErrFactoryClosed
+// （本地确定性错误），不再照常发请求。修复前 Close 只注销配置回调，端点
+// 仍可正常调用（与 gRPC 工厂 #148 的行为不一致）。
+func TestHTTPEndpointFactoryClose_EndpointsRejected(t *testing.T) {
+	var hits atomic.Int64
+	factory := newHTTPFactoryWithTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, `{"ok":true}`)
+	})
+
+	ep, err := factory.MakeEndpoint("svc-a")
+	if err != nil {
+		t.Fatalf("MakeEndpoint: %v", err)
+	}
+
+	var got map[string]any
+	if _, callErr := ep(context.Background(), HTTPRequest{Method: http.MethodGet, Path: "/x", Result: &got}); callErr != nil {
+		t.Fatalf("endpoint call before Close: %v", callErr)
+	}
+	if hits.Load() != 1 {
+		t.Fatalf("expected 1 backend hit before Close, got %d", hits.Load())
+	}
+
+	factory.Close()
+
+	_, err = ep(context.Background(), HTTPRequest{Method: http.MethodGet, Path: "/x"})
+	if !errors.Is(err, ErrFactoryClosed) {
+		t.Fatalf("endpoint after Close: expected ErrFactoryClosed, got %v", err)
+	}
+	if !localFault(err) {
+		t.Fatal("ErrFactoryClosed must be a local deterministic error (no breaker/node penalty)")
+	}
+	if hits.Load() != 1 {
+		t.Fatalf("closed factory must not reach the backend, got %d hits", hits.Load())
+	}
+
+	// 重复 Close 幂等（含 f.http.Close）
+	factory.Close()
 }
 
 // TestFactoryClose_Idempotent 钉住重复 Close 边界：句柄注销幂等，两工厂

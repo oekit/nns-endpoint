@@ -82,8 +82,10 @@ func NewGRPCEndpointFactory(c *nnsclient.ServiceClient, opts ...EndpointFactoryO
 	cfg := newFactoryConfig(opts)
 	tmpl := newBreakerTemplate(grpcMetricsKind, cfg)
 	f := &GRPCEndpointFactory{
-		client:        c,
-		pool:          NewGRPCPool(),
+		client: c,
+		// #231：池容量/空闲驱逐 TTL 可经 WithPoolMaxSize/WithPoolIdleTTL
+		// 配置；0 值由 newGRPCPool 回退默认（128 / 10m）。
+		pool:          newGRPCPool(cfg.poolMaxSize, cfg.poolIdleTTL),
 		selectorCache: newSelectorCache(c, cfg.selector),
 		breakers:      newBreakerCache(tmpl.settingsFor),
 		metrics:       tmpl.metrics,

@@ -9,7 +9,7 @@ require (
 	github.com/oekit/logx v0.12.1
 	github.com/oekit/metrics v0.4.3
 	github.com/oekit/nns v0.10.1
-	github.com/oekit/pkg v0.56.0
+	github.com/oekit/pkg v0.57.0
 	github.com/oekit/registry v0.8.3
 	github.com/oekit/registry/nacos v0.2.0
 	github.com/prometheus/client_golang v1.25.0

@@ -173,8 +173,13 @@ github.com/oekit/metrics v0.4.3 h1:DVrZ4tf6FP0bGu1ujIZq0jolI4pGTtHsTfC7WvEOesk=
 github.com/oekit/metrics v0.4.3/go.mod h1:IDug39TGwk/ZcjU47id2Ng4ny5BR6LVKbDvb6Lx5FQI=
 github.com/oekit/nns v0.10.2 h1:wCkoIhD7X5r0CAF61XxmEGozcJK6OzCao6Jv6tZOmYA=
 github.com/oekit/nns v0.10.2/go.mod h1:GTcKCCjhaQYWrETlA78v7Spew0Gn54uih0TtC3iYv4g=
+<<<<<<< HEAD
 github.com/oekit/pkg v0.61.1 h1:vJtwzIvkiMv5Xu9m1u6mglcw1sMiDJnPL7kzK8iEIlY=
 github.com/oekit/pkg v0.61.1/go.mod h1:Cr6sJpBX2a0gAIgLa32+NY69h/UZtuN6L1ZdXtP9upo=
+=======
+github.com/oekit/pkg v0.61.2 h1:QvD2SHz6AB4esg+tneqZUwCszY5H/Zku5smCXMvRQpc=
+github.com/oekit/pkg v0.61.2/go.mod h1:Cr6sJpBX2a0gAIgLa32+NY69h/UZtuN6L1ZdXtP9upo=
+>>>>>>> 3e8e088 (build: 依赖地板对齐——pkg → v0.61.2)
 github.com/oekit/registry v0.8.4 h1:iUV9+JWxYlvfuwVl8WAQLKOWHDX9GishWtSJqfdvsj0=
 github.com/oekit/registry v0.8.4/go.mod h1:4xU0BtMlDQQM4pBvhZ0YvCQPwdVkJ7l9SYnQNEclNms=
 github.com/oekit/registry/nacos v0.2.0 h1:4FD78/FRU++fURBrJow3KG2vWinKfCidyTIAbE+RN00=

@@ -3,6 +3,7 @@ package endpoint
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -138,7 +139,7 @@ func TestGRPCPool_Get_RequiresExplicitCredentials(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected no-transport-security error, got nil")
 	}
-	if !containsAny(err.Error(), "no transport security set") {
+	if !strings.Contains(err.Error(), "no transport security set") {
 		t.Errorf("expected 'no transport security set' error, got: %v", err)
 	}
 
@@ -197,7 +198,7 @@ func TestGRPCEndpoint_MakeEndpoint_InvalidRequestType(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected type assertion error, got nil")
 	}
-	if !containsAny(err.Error(), "invalid request type") {
+	if !strings.Contains(err.Error(), "invalid request type") {
 		t.Errorf("expected 'invalid request type' error, got: %v", err)
 	}
 }
@@ -510,7 +511,7 @@ func TestGRPCPool_Acquire_FullPoolEvictSkipsInFlight(t *testing.T) {
 
 	// 满池创建新地址：驱逐跳过在用的 A → 拒绝创建
 	_, err = pool.Get(context.Background(), addrB, dialOpts...)
-	if err == nil || !containsAny(err.Error(), "max size") {
+	if err == nil || !strings.Contains(err.Error(), "max size") {
 		t.Fatalf("expected max size reached while in-flight conn occupies pool, got: %v", err)
 	}
 
@@ -540,6 +541,144 @@ func TestGRPCPool_Acquire_FullPoolEvictSkipsInFlight(t *testing.T) {
 	}
 	if state := connA.GetState(); state != connectivity.Shutdown {
 		t.Errorf("expected released+expired conn evicted (Shutdown), got %v", state)
+	}
+}
+
+// TestGRPCPool_FullPoolEvictsLRU 是 #231 的回归：满池且无空闲超龄条目时，
+// 按 lastUsed 最旧且 inFlight==0 做 LRU 淘汰，让位给新地址——修复前一律
+// 返回 max size reached，滚动发布 10 分钟内超过 maxSize 个实例地址时新
+// 地址连接创建失败。idleTTL 设为足够长，隔离「空闲超龄驱逐」路径，只测
+// LRU 选择。
+func TestGRPCPool_FullPoolEvictsLRU(t *testing.T) {
+	pool := newGRPCPool(2, time.Hour)
+	defer pool.Close()
+
+	const (
+		addrA = "10.10.0.1:1"
+		addrB = "10.10.0.2:2"
+		addrC = "10.10.0.3:3"
+	)
+	connA, err := pool.Get(context.Background(), addrA, withTestInsecureCreds())
+	if err != nil {
+		t.Fatalf("Get A: %v", err)
+	}
+	connB, err := pool.Get(context.Background(), addrB, withTestInsecureCreds())
+	if err != nil {
+		t.Fatalf("Get B: %v", err)
+	}
+
+	// A 比 B 更久未使用；两者都未超过 idleTTL（1h）
+	pool.mu.Lock()
+	pool.conns[addrA].lastUsed = time.Now().Add(-30 * time.Minute)
+	pool.conns[addrB].lastUsed = time.Now().Add(-10 * time.Minute)
+	pool.mu.Unlock()
+
+	connC, err := pool.Get(context.Background(), addrC, withTestInsecureCreds())
+	if err != nil {
+		t.Fatalf("Get C on full pool: %v (LRU eviction must make room)", err)
+	}
+	if connC == nil {
+		t.Fatal("Get C returned nil conn")
+	}
+
+	if state := connA.GetState(); state != connectivity.Shutdown {
+		t.Errorf("expected LRU-oldest conn A evicted (Shutdown), got %v", state)
+	}
+	if state := connB.GetState(); state == connectivity.Shutdown {
+		t.Error("expected newer conn B kept, but it was evicted")
+	}
+	pool.mu.RLock()
+	_, hasA := pool.conns[addrA]
+	_, hasB := pool.conns[addrB]
+	_, hasC := pool.conns[addrC]
+	pool.mu.RUnlock()
+	if hasA || !hasB || !hasC {
+		t.Fatalf("pool entries after LRU eviction: A=%v B=%v C=%v, want false/true/true", hasA, hasB, hasC)
+	}
+}
+
+// TestGRPCPool_FullPoolLRUSkipsInFlight 是 #231 的补充边界：LRU 只看
+// inFlight==0 的条目——最旧但正在用的连接不得被 Close（#99），次旧条目
+// 让位；全部在用才拒绝创建。
+func TestGRPCPool_FullPoolLRUSkipsInFlight(t *testing.T) {
+	pool := newGRPCPool(2, time.Hour)
+	defer pool.Close()
+
+	const (
+		addrA = "10.10.1.1:1"
+		addrB = "10.10.1.2:2"
+		addrC = "10.10.1.3:3"
+	)
+	connA, err := pool.Acquire(context.Background(), addrA, withTestInsecureCreds())
+	if err != nil {
+		t.Fatalf("Acquire A: %v", err)
+	}
+	connB, err := pool.Get(context.Background(), addrB, withTestInsecureCreds())
+	if err != nil {
+		t.Fatalf("Get B: %v", err)
+	}
+
+	// A 最旧但有在途引用；B 较新且空闲 ⇒ LRU 必须跳过 A、淘汰 B
+	pool.mu.Lock()
+	pool.conns[addrA].lastUsed = time.Now().Add(-30 * time.Minute)
+	pool.conns[addrB].lastUsed = time.Now().Add(-10 * time.Minute)
+	pool.mu.Unlock()
+
+	connC, err := pool.Get(context.Background(), addrC, withTestInsecureCreds())
+	if err != nil {
+		t.Fatalf("Get C: %v", err)
+	}
+	if connC == nil {
+		t.Fatal("Get C returned nil conn")
+	}
+	if state := connA.GetState(); state == connectivity.Shutdown {
+		t.Error("in-flight conn A must not be LRU-evicted")
+	}
+	if state := connB.GetState(); state != connectivity.Shutdown {
+		t.Errorf("expected free conn B evicted (Shutdown), got %v", state)
+	}
+	if got := inFlightOf(pool, addrA); got != 1 {
+		t.Errorf("in-flight count of A = %d, want 1", got)
+	}
+	pool.Release(addrA, connA)
+}
+
+// TestGRPCFactory_PoolOptions 钉住 #231 的配置注入：WithPoolMaxSize /
+// WithPoolIdleTTL 落到工厂池的 maxSize/idleTTL。
+func TestGRPCFactory_PoolOptions(t *testing.T) {
+	factory := NewGRPCEndpointFactory(newTestServiceClient(t),
+		WithPoolMaxSize(7), WithPoolIdleTTL(2*time.Minute))
+	defer factory.Close()
+
+	if got := factory.pool.maxSize; got != 7 {
+		t.Errorf("pool maxSize = %d, want 7", got)
+	}
+	if got := factory.pool.idleTTL; got != 2*time.Minute {
+		t.Errorf("pool idleTTL = %v, want 2m", got)
+	}
+}
+
+// TestGRPCFactory_PoolOptionsInvalidPanic 钉住 Option 非法值 fail-fast
+// （#231 / AGENTS.md Option 总则）：非正上限没有可用语义，构造期 panic。
+func TestGRPCFactory_PoolOptionsInvalidPanic(t *testing.T) {
+	tests := []struct {
+		name string
+		opt  EndpointFactoryOption
+	}{
+		{"max size zero", WithPoolMaxSize(0)},
+		{"max size negative", WithPoolMaxSize(-1)},
+		{"idle ttl zero", WithPoolIdleTTL(0)},
+		{"idle ttl negative", WithPoolIdleTTL(-time.Second)},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			defer func() {
+				if recover() == nil {
+					t.Fatal("expected construction-time panic for invalid pool option")
+				}
+			}()
+			NewGRPCEndpointFactory(newTestServiceClient(t), tc.opt)
+		})
 	}
 }
 
@@ -633,22 +772,40 @@ func TestGRPCPool_Release_IdentityCheck(t *testing.T) {
 	}
 }
 
-// TestGRPCPool_Create_FullPoolRejectsWhenNoIdle 覆盖满池拒绝路径的边界：
-// 池满且没有空闲超龄条目可驱逐时，仍直接拒绝（max size reached）。
-func TestGRPCPool_Create_FullPoolRejectsWhenNoIdle(t *testing.T) {
+// TestGRPCPool_Create_FullPoolEvictsFreshFree 钉住 #231 的 LRU 语义：
+// 池满且唯一旧条目未超龄但已无在途引用时，不再直接 max size reached，
+// 而是按 LRU 淘汰最旧空闲条目、创建新连接（滚动发布地址快速轮换的场景）。
+func TestGRPCPool_Create_FullPoolEvictsFreshFree(t *testing.T) {
 	pool := NewGRPCPool(1)
 	defer pool.Close()
 
-	conn1, err := pool.Get(context.Background(), "10.0.0.1:1", withTestInsecureCreds())
+	const (
+		addrA = "10.0.0.1:1"
+		addrB = "10.0.0.2:2"
+	)
+	connA, err := pool.Get(context.Background(), addrA, withTestInsecureCreds())
 	if err != nil {
 		t.Fatalf("Get first: %v", err)
 	}
-	// 归还借出引用（#99）：让驱逐判据只看 lastUsed 新鲜度
-	pool.Release("10.0.0.1:1", conn1)
+	// 归还借出引用（#99）：让驱逐判据只看 inFlight==0 + lastUsed
+	pool.Release(addrA, connA)
 
-	_, err = pool.Get(context.Background(), "10.0.0.2:2", withTestInsecureCreds())
-	if err == nil || !containsAny(err.Error(), "max size") {
-		t.Fatalf("expected max size reached (fresh pool, nothing idle), got: %v", err)
+	connB, err := pool.Get(context.Background(), addrB, withTestInsecureCreds())
+	if err != nil {
+		t.Fatalf("full pool with a free fresh entry must LRU-evict, got: %v", err)
+	}
+	if connB == nil {
+		t.Fatal("Get new addr returned nil conn")
+	}
+	if state := connA.GetState(); state != connectivity.Shutdown {
+		t.Errorf("expected LRU-evicted conn A Shutdown, got %v", state)
+	}
+	pool.mu.RLock()
+	_, hasA := pool.conns[addrA]
+	_, hasB := pool.conns[addrB]
+	pool.mu.RUnlock()
+	if hasA || !hasB {
+		t.Fatalf("pool entries after LRU eviction: A=%v B=%v, want false/true", hasA, hasB)
 	}
 }
 
@@ -657,52 +814,59 @@ func TestGRPCPool_Create_FullPoolRejectsWhenNoIdle(t *testing.T) {
 // 场景：滚动发布换 IP 后旧地址连接无人再 Get——修复前空闲驱逐只在
 // Get(同 addr) 路径生效，池被陈旧连接占满时新地址一律 max size reached。
 func TestGRPCPool_Create_FullPoolEvictsIdleOtherAddr(t *testing.T) {
-	pool := NewGRPCPool(1)
+	pool := NewGRPCPool(2)
 	defer pool.Close()
 
 	const (
 		addrA = "10.0.0.1:1" // 旧实例（滚动发布后无人再访问）
-		addrB = "10.0.0.2:2" // 服务发现返回的新实例
+		addrB = "10.0.0.2:2" // 另一旧实例（仍在活跃窗口内）
+		addrC = "10.0.0.3:3" // 服务发现返回的新实例
 	)
 	connA, err := pool.Get(context.Background(), addrA, withTestInsecureCreds())
 	if err != nil {
-		t.Fatalf("Get old addr: %v", err)
+		t.Fatalf("Get old addr A: %v", err)
+	}
+	connB, err := pool.Get(context.Background(), addrB, withTestInsecureCreds())
+	if err != nil {
+		t.Fatalf("Get old addr B: %v", err)
 	}
 	// 归还借出引用（#99）：让旧地址条目重新回到「可按空闲判据驱逐」状态
 	pool.Release(addrA, connA)
 
-	// A 仍在活跃窗口内：无可驱逐条目，新地址被拒（拒绝语义保持）
-	if _, err = pool.Get(context.Background(), addrB, withTestInsecureCreds()); err == nil || !containsAny(err.Error(), "max size") {
-		t.Fatalf("expected max size reached while old entry fresh, got: %v", err)
-	}
-
-	// 将 A 置为空闲超龄（模拟旧地址长期无人 Get）
+	// 将 A 置为空闲超龄（模拟旧地址长期无人 Get），B 保持新鲜
 	pool.mu.Lock()
 	pool.conns[addrA].lastUsed = time.Now().Add(-(pool.idleTTL + time.Second))
 	pool.mu.Unlock()
 
 	// 新地址 Get：满池驱逐 A 后创建成功（修复前此处直接 max size reached）
-	connB, err := pool.Get(context.Background(), addrB, withTestInsecureCreds())
+	connC, err := pool.Get(context.Background(), addrC, withTestInsecureCreds())
 	if err != nil {
 		t.Fatalf("Get new addr after idle expiry: %v", err)
 	}
-	if connB == nil {
+	if connC == nil {
 		t.Fatal("Get new addr returned nil conn")
 	}
 
-	// A 已被驱逐关闭且条目删除，池内只剩新地址
+	// A 已被驱逐关闭且条目删除，池内保留 B 与新地址 C
 	pool.mu.RLock()
 	_, hasA := pool.conns[addrA]
 	_, hasB := pool.conns[addrB]
+	_, hasC := pool.conns[addrC]
 	pool.mu.RUnlock()
 	if hasA {
 		t.Error("expected idle old-addr entry to be evicted, still in pool")
 	}
 	if !hasB {
+		t.Error("expected fresh old-addr B kept in pool")
+	}
+	if !hasC {
 		t.Error("expected new-addr entry in pool")
 	}
 	if state := connA.GetState(); state != connectivity.Shutdown {
-		t.Errorf("expected evicted old conn Shutdown, got %v", state)
+		t.Errorf("expected evicted old conn A Shutdown, got %v", state)
+	}
+	if state := connB.GetState(); state == connectivity.Shutdown {
+		t.Error("expected fresh conn B kept, but it was evicted")
 	}
 }
 
@@ -760,7 +924,7 @@ func TestGRPCEndpoint_SelectFailureIsLocalError(t *testing.T) {
 	if !errors.As(err, &le) {
 		t.Fatalf("select failure must be wrapped as localError (#137), got %T: %v", err, err)
 	}
-	if !containsAny(err.Error(), "select node") {
+	if !strings.Contains(err.Error(), "select node") {
 		t.Errorf("expected 'select node' context in error, got: %v", err)
 	}
 	if retryable(err) {
@@ -768,5 +932,72 @@ func TestGRPCEndpoint_SelectFailureIsLocalError(t *testing.T) {
 	}
 	if !callerFault(err) {
 		t.Error("local deterministic error must classify as caller fault (not a node fault)")
+	}
+}
+
+// stubNode 是选择器测试用的固定节点（#215 回归测试用）。
+type stubNode struct{ addr string }
+
+func (n *stubNode) Address() string             { return n.addr }
+func (n *stubNode) Weight() float64             { return 1 }
+func (n *stubNode) ServiceName() string         { return "svc-a" }
+func (n *stubNode) Metadata() map[string]string { return nil }
+
+// captureDoneSelector 选点恒返回同一节点，done 收集回写的 DoneInfo
+// （#215 回归测试用：用假 done 断言 Acquire 失败路径的回写 Err 归属）。
+type captureDoneSelector struct {
+	node  loadbalance.Node
+	dones *[]loadbalance.DoneInfo
+}
+
+func (s *captureDoneSelector) Select(context.Context, []loadbalance.Node, ...loadbalance.SelectOption) (loadbalance.Node, loadbalance.DoneFunc, error) {
+	return s.node, func(_ context.Context, di loadbalance.DoneInfo) {
+		*s.dones = append(*s.dones, di)
+	}, nil
+}
+
+// TestGRPCEndpoint_AcquireFailureDoesNotPenalizeNode 是 #215 的回归测试：
+// Acquire 失败时 done 必须回写 Err: nil——Acquire 失败面全是本地错误
+// （池满 max size reached / 池已 Close 的 ErrPoolClosed / 拨号配置错误，
+// pool.go），与被选节点的健康无关；p2c makeDone 对非 nil Err 一律追加
+// EWMA 惩罚时长，本地容量问题（池满期间每次调用选中的节点都吃固定惩罚）
+// 不得系统性拉偏流量分布。与 #97（熔断拒绝不回写节点惩罚）同一红线。
+//
+// 本地失败注入：直接 Close 连接池，Acquire 恒返回 ErrPoolClosed（入口终态
+// 闸短路，不触达网络、不确定时）。
+func TestGRPCEndpoint_AcquireFailureDoesNotPenalizeNode(t *testing.T) {
+	c := newTestServiceClient(t)
+	var dones []loadbalance.DoneInfo
+	factory := NewGRPCEndpointFactory(c, WithSelector(&captureDoneSelector{
+		node:  &stubNode{addr: "127.0.0.1:1"},
+		dones: &dones,
+	}))
+	defer factory.Close()
+
+	ep, err := factory.MakeEndpoint("svc-a")
+	if err != nil {
+		t.Fatalf("MakeEndpoint: %v", err)
+	}
+
+	factory.pool.Close()
+
+	_, callErr := ep(context.Background(), GRPCRequest{
+		GrpcServiceName: "helloworld.Greeter",
+		Method:          "SayHello",
+		Request:         wrapperspb.String("x"),
+		Reply:           &wrapperspb.StringValue{},
+	})
+	if callErr == nil {
+		t.Fatal("expected error from closed pool")
+	}
+	if !strings.Contains(callErr.Error(), "get grpc conn") {
+		t.Errorf("expected 'get grpc conn' context in error, got: %v", callErr)
+	}
+
+	if len(dones) != 1 {
+		t.Fatalf("done called %d times, want 1", len(dones))
+	}
+	if dones[0].Err != nil {
+		t.Fatalf("Acquire 失败回写 Err = %v, want nil（本地错误不惩罚节点，#215）", dones[0].Err)
 	}
 }

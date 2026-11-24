@@ -2,6 +2,43 @@
 
 由 ekit v0.34.0（git.enjoye.top/enjoydream/ekit，冻结维护）拆分而来。所有 notable 变更记录如下。
 
+## [v0.5.2] — 2026-11-23
+
+- build: 依赖地板对齐（矩阵地板波次）——新地板：github.com/oekit/pkg v0.60.0 。零行为变化；已发布产物的 go.mod 地板此前滞后于矩阵登记版本，本版把新地板焊进已发布产物。
+
+## [v0.5.1] — 2026-11-21
+
+- 第三轮设计/缺陷审计（2026-11-21）nns-endpoint 修复：
+
+- fix: 重试前按 HTTP 方法幂等门（GET/HEAD/PUT/DELETE/OPTIONS/TRACE；POST/PATCH 缺省不重试）+ HTTPRequest.Idempotent 显式开关——POST 5xx 不再缺省重放 3 次（#231）
+- fix: 429 退避取 max(Retry-After, attemptBackoff)——不再 150ms 内重打限流窗口（#231）
+- fix: 内层 HTTP 客户端读超时随请求动态设置（WithStream + 逐请求 ReadTimeout）——服务治理 45s/60s 超时不再被 30s 硬编码掐断（#231）
+- feat: gRPC 池新增 WithPoolMaxSize/WithPoolIdleTTL + 满池 LRU 淘汰（lastUsed 最旧且 inFlight==0）——滚动发布 128 地址上限问题可调可解（#231）
+- fix: selector 缓存引入 epoch（reset 递增、writeThrough 仅在 epoch 未变写入）——配置热更不再被首建竞态覆盖（#231）
+- fix: HTTP 工厂 Close 置终态（存量端点 ErrFactoryClosed）+ 调内层 Close，与 gRPC 对齐（#231）
+
+关联问题单：nns-endpoint#231。
+
+## [v0.5.0] — 2026-11-20
+
+- test(http): parseHostPort 26 行手写解析换标准库（url.Parse+SplitHostPort+Atoi，20 个调用点零改动）；containsAny 手搓 indexOfStr 换 strings.Contains——与 httpx#267 逐字节孪生成对清理（#222）
+
+## [v0.4.3] — 2026-11-19
+
+- - fix: grpc Acquire 失败不再回写 DoneInfo{Err} 惩罚无辜节点——失败面全是本地错误（池满/池关/拨号配置），与被选节点健康无关，裸写会让 p2c EWMA 给碰巧选中的节点加固定惩罚、流量分布被本地容量问题系统性拉偏；对齐同文件 nodeFaultErr 口径（#124/#97 同一红线），附假 done 断言回归（#215）
+
+关联问题单：nns-endpoint#215。
+
+## [v0.4.2] — 2026-11-18
+
+- doRequest URL 拼接补前导斜杠归一,Path 无 / 不再拨出坏 URL(httpx#112 孪生)(#202);重试判定收敛 concurrency/retry/httpx 单源——429 按 Retry-After 可重试、父 ctx 取消不再紧循环白烧、attempt 间 50ms 退避(#203);balancer_cache 迁 concurrency/singleflight(ctx 透传)、错误体截断改 stringx.FirstN rune 安全(#204);URL 拼接薄委托 pathx.JoinURL(pkg v0.53.0 原语)
+
+关联问题单：nns-endpoint#202、nns-endpoint#203、nns-endpoint#204。
+
+## [v0.4.1] — 2026-11-16
+
+- refactor: fmt.Errorf → oekit/pkg/errors 三形态对位替换（#520 替换波）+ 依赖地板抬至 pkg v0.52.0。文案逐字节同形（测试断言零修改），多 %w/%w 居中/哨兵前置形态按仓规保留
+
 ## [v0.4.0] — 2026-11-13
 
 - **BREAKING**：依赖地板抬 metrics v0.4.0 / pkg v0.48.0 / httpx v0.12.0（三者兼容层均已删）。本仓迁移：熔断 seed gauge ObserveBreakerState(…, StateClosed) → ObserveBreakerStateTyped(…, CircuitStateClosed)（OnStateChange 路径此前已是 Typed 形态）。下游直接消费 metrics 历史入口或 pkg errors.Errorf 的需随地板同迁。

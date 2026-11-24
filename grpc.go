@@ -10,6 +10,7 @@ import (
 	nnsclient "github.com/oekit/nns/client"
 
 	"github.com/oekit/metrics/resilience"
+	pkgerrors "github.com/oekit/pkg/errors"
 
 	"github.com/oekit/httpx/loadbalance"
 	"github.com/oekit/registry"
@@ -81,8 +82,10 @@ func NewGRPCEndpointFactory(c *nnsclient.ServiceClient, opts ...EndpointFactoryO
 	cfg := newFactoryConfig(opts)
 	tmpl := newBreakerTemplate(grpcMetricsKind, cfg)
 	f := &GRPCEndpointFactory{
-		client:        c,
-		pool:          NewGRPCPool(),
+		client: c,
+		// #231：池容量/空闲驱逐 TTL 可经 WithPoolMaxSize/WithPoolIdleTTL
+		// 配置；0 值由 newGRPCPool 回退默认（128 / 10m）。
+		pool:          newGRPCPool(cfg.poolMaxSize, cfg.poolIdleTTL),
 		selectorCache: newSelectorCache(c, cfg.selector),
 		breakers:      newBreakerCache(tmpl.settingsFor),
 		metrics:       tmpl.metrics,
@@ -121,7 +124,7 @@ func (f *GRPCEndpointFactory) MakeEndpoint(serviceName string, opts ...grpc.Dial
 
 		req, ok := request.(GRPCRequest)
 		if !ok {
-			return nil, fmt.Errorf("invalid request type, expected GRPCRequest")
+			return nil, pkgerrors.New("invalid request type, expected GRPCRequest")
 		}
 
 		// #71/#73：默认 proto codec 只接受 proto.Message。请求/响应的
@@ -129,15 +132,15 @@ func (f *GRPCEndpointFactory) MakeEndpoint(serviceName string, opts ...grpc.Dial
 		// 直接报配置性错误，而不是把裸 *any 塞给 Invoke 在 codec 深处
 		// 报晦涩的编解码错误（响应此前永远拿不到）。
 		if req.Reply == nil {
-			return nil, fmt.Errorf("GRPCRequest.Reply must be a non-nil proto.Message pointer (e.g. &helloworld.HelloReply{}) to receive the response")
+			return nil, pkgerrors.New("GRPCRequest.Reply must be a non-nil proto.Message pointer (e.g. &helloworld.HelloReply{}) to receive the response")
 		}
 		if _, ok := req.Request.(proto.Message); !ok {
-			return nil, fmt.Errorf("invalid request type %T: gRPC request must implement proto.Message", req.Request)
+			return nil, pkgerrors.Newf("invalid request type %T: gRPC request must implement proto.Message", req.Request)
 		}
 
 		instances, err := f.client.GetInstances(ctx, serviceName)
 		if err != nil {
-			return nil, fmt.Errorf("get instances: %w", err)
+			return nil, pkgerrors.Wrapf(err, "get instances")
 		}
 
 		if len(instances) == 0 {
@@ -166,8 +169,17 @@ func (f *GRPCEndpointFactory) MakeEndpoint(serviceName string, opts ...grpc.Dial
 
 		conn, err := f.pool.Acquire(ctx, n.Address(), opts...)
 		if err != nil {
-			done(ctx, loadbalance.DoneInfo{Err: err})
-			return nil, fmt.Errorf("get grpc conn: %w", err)
+			// #215：Acquire 失败面全是本地错误（池满 max size reached、池已
+			// Close 的 ErrPoolClosed、拨号配置错误，见 pool.go），与被选节点
+			// 的健康无关——done 回写 Err: nil，不惩罚「碰巧被选中的节点」：
+			// p2c makeDone 对非 nil Err 一律追加惩罚时长，池满期间每次调用
+			// 选中的节点都吃固定 EWMA 惩罚，本地容量问题会系统性拉偏流量
+			// 分布。与 #97（熔断拒绝不回写节点惩罚）同一红线、与 #124
+			// （调用错误经 nodeFaultErr 归一为 nil）同一口径；错误本身仍经
+			// 返回值透出（"get grpc conn" 包装），与 #137 选点失败路径同为
+			// 本地确定性错误形态、不打日志。
+			done(ctx, loadbalance.DoneInfo{Err: nil})
+			return nil, pkgerrors.Wrapf(err, "get grpc conn")
 		}
 		// #99：借出记在途引用，调用结束归还——空闲驱逐不会关闭有在途
 		// 引用的连接。直接使用池的长生命周期流式调用方同样经

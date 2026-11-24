@@ -5,12 +5,18 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"strconv"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode/utf8"
 
+	"github.com/cloudwego/hertz/pkg/protocol"
 	nnsclient "github.com/oekit/nns/client"
 	"github.com/oekit/nns/metadata"
 	"github.com/oekit/registry"
@@ -41,32 +47,25 @@ func newHTTPFactoryWithTestServer(t *testing.T, handler http.HandlerFunc) *HTTPE
 	return NewHTTPEndpointFactory(c)
 }
 
-// parseHostPort extracts host and port from "http://host:port".
-func parseHostPort(url string) (string, int) {
-	const prefix = "http://"
-	if len(url) < len(prefix) || url[:len(prefix)] != prefix {
-		return url, 0
+// parseHostPort extracts host and port from "http://host:port"（httptest
+// server URL 形态）。
+// #222：原 26 行手写逐字节解析（与 httpx 同名 helper 逐字节双份）改走
+// stdlib url.Parse + net.SplitHostPort；调用点只喂 httptest URL，解析失败
+// 时按原口径返回 (原串, 0) 让后续断言显式失败。
+func parseHostPort(rawURL string) (string, int) {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return rawURL, 0
 	}
-	rest := url[len(prefix):]
-	colon := -1
-	for i := 0; i < len(rest); i++ {
-		if rest[i] == ':' {
-			colon = i
-			break
-		}
+	host, portStr, err := net.SplitHostPort(u.Host)
+	if err != nil {
+		return u.Host, 0
 	}
-	if colon < 0 {
-		return rest, 0
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		return host, 0
 	}
-	port := 0
-	for i := colon + 1; i < len(rest); i++ {
-		ch := rest[i]
-		if ch < '0' || ch > '9' {
-			break
-		}
-		port = port*10 + int(ch-'0')
-	}
-	return rest[:colon], port
+	return host, port
 }
 
 // TestHTTPEndpoint_DoRequest_HappyPath covers the 200 + JSON body path.
@@ -141,7 +140,7 @@ func TestHTTPEndpoint_DoRequest_NonSuccess(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for 500 response, got nil")
 	}
-	if !containsAny(err.Error(), "500") {
+	if !strings.Contains(err.Error(), "500") {
 		t.Errorf("expected error to mention 500, got: %v", err)
 	}
 }
@@ -278,7 +277,7 @@ func TestHTTPEndpoint_MakeEndpoint_InvalidRequestType(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected type assertion error, got nil")
 	}
-	if !containsAny(err.Error(), "invalid request type") {
+	if !strings.Contains(err.Error(), "invalid request type") {
 		t.Errorf("expected 'invalid request type' error, got: %v", err)
 	}
 }
@@ -459,7 +458,7 @@ func TestHTTPEndpoint_DoRequest_StripTrailingSlash(t *testing.T) {
 	if got == nil {
 		t.Fatal("no request captured")
 	}
-	if containsAny(*got, "//") {
+	if strings.Contains(*got, "//") {
 		t.Errorf("expected no '//' in path, got %q", *got)
 	}
 }
@@ -471,6 +470,28 @@ func TestHTTPEndpoint_Close(t *testing.T) {
 	)
 	factory := NewHTTPEndpointFactory(c)
 	factory.Close() // should not panic
+}
+
+// TestHTTPFactory_ReadTimeoutFollowsRequest 是 #231 的回归：内层 HTTP 客户端
+// 不再固定 30s 读超时——客户端级读预算关闭（WithStream），单次尝试的读
+// 预算随请求级选项设置（config.WithReadTimeout），服务治理 ReadTimeout
+// 配 45s/60s 的慢接口不会被固定 30s 掐断。
+func TestHTTPFactory_ReadTimeoutFollowsRequest(t *testing.T) {
+	factory := newHTTPFactoryWithTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	defer factory.Close()
+
+	if got := factory.http.Hertz().GetOptions().ReadTimeout; got != 0 {
+		t.Fatalf("inner client read timeout = %v, want 0 (per-request #231)", got)
+	}
+
+	hReq := protocol.AcquireRequest()
+	defer protocol.ReleaseRequest(hReq)
+	applyReadTimeout(hReq, 45*time.Second)
+	if got := hReq.Options().ReadTimeout(); got != 45*time.Second {
+		t.Fatalf("per-request read timeout = %v, want 45s (#231)", got)
+	}
 }
 
 // TestHTTPEndpoint_TimeoutFallbackWhenUnset 覆盖 #75：req.Timeout 与服务治理
@@ -519,17 +540,109 @@ func TestHTTPEndpoint_TimeoutFallbackWhenUnset(t *testing.T) {
 	}
 }
 
-// containsAny is a small strings.Contains helper kept inline to avoid
-// importing strings for a single use.
-func containsAny(s, sub string) bool {
-	return len(s) >= len(sub) && (s == sub || indexOfStr(s, sub) >= 0)
+// TestJoinEndpointURL 钉住 #202 的拼接归一口径（与 httpx#112 同语义）：
+// base 去尾 "/"、path 缺前导 "/" 时补齐；path 为空保持 addr 原样；
+// path 尾斜杠不归一（调用方声明的 "/api/v1/" 保持原样）。
+func TestJoinEndpointURL(t *testing.T) {
+	tests := []struct {
+		name string
+		addr string
+		path string
+		want string
+	}{
+		{"addr trailing slash stripped", "http://h:8080/", "/api/x", "http://h:8080/api/x"},
+		{"addr without trailing slash untouched", "http://h:8080", "/api/x", "http://h:8080/api/x"},
+		{"path without leading slash gets one (#202)", "http://h:8080", "api/x", "http://h:8080/api/x"},
+		{"path trailing slash preserved", "http://h:8080", "/api/v1/", "http://h:8080/api/v1/"},
+		{"empty path keeps addr (trailing slash stripped)", "http://h:8080/", "", "http://h:8080"},
+		{"empty path keeps addr (no trailing slash)", "http://h:8080", "", "http://h:8080"},
+		{"multiple trailing slashes stripped", "http://h:8080///", "api/x", "http://h:8080/api/x"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := joinEndpointURL(tc.addr, tc.path); got != tc.want {
+				t.Errorf("joinEndpointURL(%q, %q) = %q, want %q", tc.addr, tc.path, got, tc.want)
+			}
+		})
+	}
 }
 
-func indexOfStr(s, sub string) int {
-	for i := 0; i+len(sub) <= len(s); i++ {
-		if s[i:i+len(sub)] == sub {
-			return i
-		}
+// TestHTTPEndpoint_DoRequest_URLJoin 是 #202 的端到端回归：经真实 HTTP
+// 断言最终请求 URL——path 缺前导 "/" 时必须补齐，否则 host 被吃进 path
+// （拨号 "http://h:8080api/x" 报误导性的 unknown port）；空 path 请求
+// addr 根路径。三例覆盖 path 带前导斜杠/不带/空。
+func TestHTTPEndpoint_DoRequest_URLJoin(t *testing.T) {
+	tests := []struct {
+		name string
+		addr func(serverURL string) string
+		path string
+		want string // 期望实际到达服务器的请求路径
+	}{
+		{"path with leading slash", func(u string) string { return u }, "/x", "/x"},
+		{"addr with trailing slash + path with leading slash", func(u string) string { return u + "/" }, "/x", "/x"},
+		{"path without leading slash (#202)", func(u string) string { return u }, "x", "/x"},
+		{"empty path (#202)", func(u string) string { return u }, "", "/"},
 	}
-	return -1
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var gotPath atomic.Value
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotPath.Store(r.URL.Path)
+				w.WriteHeader(http.StatusOK)
+				_, _ = io.WriteString(w, "ok")
+			}))
+			defer srv.Close()
+
+			host, port := parseHostPort(srv.URL)
+			c := nnsclient.New(
+				nnsclient.WithMockMode(true),
+				nnsclient.WithStaticInstances("svc-a", []registry.Instance{{IP: host, Port: port}}),
+			)
+			factory := NewHTTPEndpointFactory(c)
+			defer factory.Close()
+
+			_, err := factory.doRequest(context.Background(), tc.addr(srv.URL),
+				HTTPRequest{Method: http.MethodGet, Path: tc.path}, 5*time.Second)
+			if err != nil {
+				t.Fatalf("doRequest: %v", err)
+			}
+			if got := gotPath.Load().(string); got != tc.want {
+				t.Errorf("request reached path %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestHTTPEndpoint_ErrorBodyUTF8Safe 是 #204 的回归：非 2xx 错误体摘要
+// 不得腰斩多字节字符——修复前 msg[:min(len(msg),500)] 字节截断把落在
+// 边界上的 UTF-8 字符切成非法尾字节（日志/存储层拒收或乱码）。
+// body 构造为 499 字节 ASCII + 1 个三字节汉字 + 后缀：修复前第 500 字节
+// 落在汉字首字节上；修复后按 rune 截断（FirstN），汉字完整保留。
+func TestHTTPEndpoint_ErrorBodyUTF8Safe(t *testing.T) {
+	body := strings.Repeat("a", 499) + "界" + strings.Repeat("b", 20)
+	factory := newHTTPFactoryWithTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = io.WriteString(w, body)
+	})
+	defer factory.Close()
+
+	ep, err := factory.MakeEndpoint("svc-a")
+	if err != nil {
+		t.Fatalf("MakeEndpoint: %v", err)
+	}
+
+	_, callErr := ep(context.Background(), HTTPRequest{Method: http.MethodGet, Path: "/x"})
+	if callErr == nil {
+		t.Fatal("expected 500 error from endpoint")
+	}
+	msg := callErr.Error()
+	if !utf8.ValidString(msg) {
+		t.Fatalf("error message is not valid UTF-8 (multi-byte truncation regression): %q", msg)
+	}
+	if !strings.Contains(msg, "界") {
+		t.Errorf("multi-byte char straddling the truncation boundary was dropped: %q", msg)
+	}
+	if strings.Contains(msg, "b") {
+		t.Errorf("summary must still be truncated to 500 runes, got full body: %q", msg)
+	}
 }

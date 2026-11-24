@@ -3,12 +3,12 @@ package endpoint
 import (
 	"context"
 	"errors"
-	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/oekit/logx"
+	pkgerrors "github.com/oekit/pkg/errors"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/connectivity"
 )
@@ -39,7 +39,11 @@ type connEntry struct {
 }
 
 // GRPCPool gRPC 连接池，复用 gRPC 客户端连接。
-// 连接数超过 maxSize 时先全局驱逐空闲超龄条目，仍满则拒绝创建新连接。
+// 连接数达到 maxSize 时先全局驱逐空闲超龄条目，仍满则按 LRU 淘汰
+// lastUsed 最旧且无在途引用的条目（#231：滚动发布 10 分钟内超过 maxSize
+// 个实例地址时不再一律拒绝）；全部条目都有在途引用才拒绝创建新连接。
+// maxSize/idleTTL 缺省 defaultMaxPoolSize/defaultIdleTTL，可经工厂选项
+// WithPoolMaxSize/WithPoolIdleTTL 配置（#231）。
 // 空闲超过 idleTTL 的连接在 Get 时自动驱逐（同地址命中与满池创建两条
 // 路径都会驱逐）；有在途引用（Acquire 后未 Release）的连接不参与驱逐
 // （#99）——conn.Close 会终止其上全部活跃 RPC。
@@ -73,7 +77,8 @@ type GRPCPool struct {
 // maxSize 可省略（缺省 defaultMaxPoolSize）；显式传入 ≤0 的值同样回退
 // 默认值（原 NewGRPCPoolWithSize 的守卫语义）。两个构造器除 maxSize 外
 // 逐行相同、且带尺寸形态全工作区仅测试使用（#134）——合并为单一构造器，
-// 公开面少一个入口。
+// 公开面少一个入口。idleTTL 走工厂选项 WithPoolIdleTTL（#231）或本包内
+// newGRPCPool（测试可直改字段）。
 func NewGRPCPool(maxSize ...int) *GRPCPool {
 	if len(maxSize) > 1 {
 		// 构造期非法值 fail-fast（AGENTS.md Option 总则）：变参误用即编程错误
@@ -83,10 +88,23 @@ func NewGRPCPool(maxSize ...int) *GRPCPool {
 	if len(maxSize) == 1 && maxSize[0] > 0 {
 		size = maxSize[0]
 	}
+	return newGRPCPool(size, 0)
+}
+
+// newGRPCPool 是连接池的内部构造器：maxSize/idleTTL ≤0 回退默认值
+// （#231：让 GRPC 工厂经 WithPoolMaxSize/WithPoolIdleTTL 注入配置，
+// 同时保留 NewGRPCPool 的公开语义）。
+func newGRPCPool(maxSize int, idleTTL time.Duration) *GRPCPool {
+	if maxSize <= 0 {
+		maxSize = defaultMaxPoolSize
+	}
+	if idleTTL <= 0 {
+		idleTTL = defaultIdleTTL
+	}
 	return &GRPCPool{
 		conns:   make(map[string]*connEntry),
-		maxSize: size,
-		idleTTL: defaultIdleTTL,
+		maxSize: maxSize,
+		idleTTL: idleTTL,
 	}
 }
 
@@ -233,12 +251,18 @@ func (p *GRPCPool) create(_ context.Context, addr string, ref bool, opts ...grpc
 		}
 		delete(p.conns, addr)
 	} else if len(p.conns) >= p.maxSize {
-		// 满池先全局驱逐空闲超龄条目再拒绝（#72/#76）：空闲驱逐原本只在
+		// 满池先全局驱逐空闲超龄条目（#72/#76）：空闲驱逐原本只在
 		// Get(同 addr) 路径生效——滚动发布换 IP 后旧地址连接无人再 Get，
 		// 池被陈旧连接占满时新地址一律 max size reached，扩容实例直接被拒。
 		p.evictIdleLocked()
-		if len(p.conns) >= p.maxSize {
-			return nil, fmt.Errorf("grpc pool: max size %d reached, cannot create new connection to %s", p.maxSize, addr)
+		// 仍满则按 LRU 淘汰 lastUsed 最旧且 inFlight==0 的条目（#231）：
+		// 滚动发布 10 分钟内超过 maxSize 个实例地址是常态，未超龄的旧地址
+		// 连接也应让位给新地址；有在途引用的条目跳过（#99，Close 会终止
+		// 其上活跃 RPC），全部在用才拒绝创建。
+		for len(p.conns) >= p.maxSize {
+			if !p.evictLRULocked() {
+				return nil, pkgerrors.Newf("grpc pool: max size %d reached, cannot create new connection to %s", p.maxSize, addr)
+			}
 		}
 	}
 
@@ -246,7 +270,7 @@ func (p *GRPCPool) create(_ context.Context, addr string, ref bool, opts ...grpc
 	if err != nil {
 		// 典型触发是未显式传传输凭据（#77）：grpc 的 errNoTransportSecurity
 		// 已自带修复指引（显式 WithTransportCredentials），这里补地址上下文。
-		return nil, fmt.Errorf("grpc pool: create conn to %s: %w", addr, err)
+		return nil, pkgerrors.Wrapf(err, "grpc pool: create conn to %s", addr)
 	}
 
 	entry = &connEntry{conn: conn, lastUsed: time.Now()}
@@ -270,6 +294,36 @@ func (p *GRPCPool) evictIdleLocked() {
 			delete(p.conns, addr)
 		}
 	}
+}
+
+// evictLRULocked 关闭并删除 lastUsed 最旧且无在途引用的条目（#231，调用方
+// 须持写锁）；没有可淘汰条目（全部 inFlight>0 或池为空）返回 false。
+//
+// 与 evictIdleLocked 的分工：后者只处理超过 idleTTL 的条目，本函数不设年龄
+// 门槛——满池时让最近最少使用的连接为创建新连接让位，避免「未超龄但已无人
+// 使用的旧地址连接」长期占满池、扩容实例持续被 max size 拒绝。inFlight==0
+// 仍是硬约束：有活跃 RPC 的连接 Close 会终止它们（#99）。
+func (p *GRPCPool) evictLRULocked() bool {
+	var (
+		oldestAddr  string
+		oldestEntry *connEntry
+	)
+	for addr, entry := range p.conns {
+		if entry.inFlight > 0 {
+			continue
+		}
+		if oldestEntry == nil || entry.lastUsed.Before(oldestEntry.lastUsed) {
+			oldestAddr, oldestEntry = addr, entry
+		}
+	}
+	if oldestEntry == nil {
+		return false
+	}
+	if err := oldestEntry.conn.Close(); err != nil {
+		epLog.Warn("grpc conn close failed on lru evict", "addr", oldestAddr, logx.ErrKey, err)
+	}
+	delete(p.conns, oldestAddr)
+	return true
 }
 
 // Close 关闭连接池中的所有 gRPC 连接。
